@@ -2,18 +2,7 @@
 
 Groq API와 MCP를 결합해서 로컬 프로젝트를 빠르게 읽고, 새 팀원이 바로 이해할 수 있는 온보딩 보고서를 만들어주는 Python CLI 에이전트입니다.
 
-이 프로젝트는 "단일 목적 에이전트" 과제에 맞춰 범위를 `로컬 프로젝트 온보딩`으로 고정했습니다.  
-즉, 아무 자동화나 하는 범용 에이전트가 아니라 다음 한 가지 목적에 집중합니다.
-
 - 프로젝트 폴더를 읽고 구조, 기술 스택, 실행법, 핵심 파일, 리스크를 정리한다.
-
-## 과제 적합성
-
-- 단일 목적이 명확합니다: `프로젝트 온보딩 보고서 생성`
-- LLM 추론과 도구 호출이 함께 들어갑니다: `Groq + MCP`
-- 실제 입력과 출력이 분명합니다
-  - 입력: 프로젝트 폴더 경로 또는 프로젝트 분석 요청
-  - 출력: Markdown/JSON 보고서
 
 ## 주요 기능
 
@@ -125,11 +114,6 @@ pbpaste | python3 main.py --stdin
 
 Markdown은 사람이 읽는 보고서이고, JSON은 제출 자료나 후속 자동화에 쓰기 쉬운 실행 로그입니다.
 
-## 샘플 자료
-
-- 요청 예시: [samples/example_requests.md](/Users/giminu0930/Desktop/groq-mcp-mac-agent/samples/example_requests.md)
-- 출력 예시 Markdown: [examples/sample_onboarding_report.md](/Users/giminu0930/Desktop/groq-mcp-mac-agent/examples/sample_onboarding_report.md)
-- 출력 예시 JSON: [examples/sample_onboarding_report.json](/Users/giminu0930/Desktop/groq-mcp-mac-agent/examples/sample_onboarding_report.json)
 
 ## 테스트
 
