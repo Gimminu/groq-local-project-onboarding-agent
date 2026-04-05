@@ -14,6 +14,17 @@ ARCHIVE_SKIP_NAMES = {".git", ".venv", "venv", "node_modules", "__pycache__", ".
 TEMP_RUNNER_PREFIXES = ("tempcoderunnerfile",)
 SYNTHETIC_TEST_HINTS = ("dummy-test", "dummy_test", "classification-smoke-test")
 VISIBLE_DUPLICATE_ASSET_TYPES = {"docs", "slides", "notes", "forms", "data", "assets"}
+VISIBLE_DUPLICATE_EXTENSIONS = {
+    ".hwp",
+    ".hwpx",
+    ".doc",
+    ".docx",
+    ".pdf",
+    ".ppt",
+    ".pptx",
+    ".xls",
+    ".xlsx",
+}
 FORCE_CANONICAL_RENAME_PATTERN = re.compile(
     r"(?i)(?:^\d{4}-\d{2}-\d{2}[_\-\s]|^\d{8}[_\-\s]|^\~\$|^\s*untitled(?:[\W_]|$)|\[(?:file|image|code|note|reference|spreadsheet|uncertain)\]|\buncertain\b)"
 )
@@ -377,9 +388,13 @@ class IndexPlanner:
     def _should_keep_duplicate_visible(self, node: IndexedNode, classification: ClassificationResult) -> bool:
         if node.kind != "file":
             return False
-        if classification.asset_type not in VISIBLE_DUPLICATE_ASSET_TYPES:
+        if not any(_is_relative_to(node.path, root) for root in self.config.watch_roots):
             return False
-        return any(_is_relative_to(node.path, root) for root in self.config.watch_roots)
+        if classification.asset_type in VISIBLE_DUPLICATE_ASSET_TYPES:
+            return True
+        # LLM output can occasionally label known office/archive files as misc.
+        # Keep visible duplicates from watch roots out of quarantine in that case.
+        return node.path.suffix.lower() in VISIBLE_DUPLICATE_EXTENSIONS
 
     def _archive_action(
         self,

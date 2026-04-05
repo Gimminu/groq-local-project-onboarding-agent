@@ -318,6 +318,92 @@ def test_duplicate_hwp_from_watch_root_moves_to_review_instead_of_quarantine(mak
     assert moves[second.absolute()] == config.spaces_root / "review" / "루키-제출서류" / "forms" / second.name
 
 
+def test_duplicate_misc_hwp_from_watch_root_is_not_quarantined(make_v2_service) -> None:
+    service, _, roots = make_v2_service()
+    watch_root = roots["watch_root"]
+    watch_root.mkdir(parents=True, exist_ok=True)
+    first = watch_root / "붙임-a.hwp"
+    second = watch_root / "붙임-b.hwp"
+    payload = "duplicate-watch-root-hwp"
+    first.write_text(payload, encoding="utf-8")
+    second.write_text(payload, encoding="utf-8")
+
+    original_classify = service.classifier.classify
+
+    def classify_as_misc(_node):
+        return ClassificationResult(
+            placement_mode="direct",
+            target_path="review/misc",
+            confidence=0.9,
+            rationale="mocked llm misc classification",
+            source="llm",
+            review_required=False,
+            metadata={"destination_root": "spaces"},
+            space="personal",
+            stream="review",
+            domain="review",
+            focus="unsorted",
+            asset_type="misc",
+        )
+
+    service.classifier.classify = classify_as_misc  # type: ignore[method-assign]
+    try:
+        plan, _ = service.run_command(command="apply", apply_requested=False)
+    finally:
+        service.classifier.classify = original_classify  # type: ignore[method-assign]
+
+    assert plan is not None
+    quarantined_sources = {action.source_path for action in plan.actions if action.action_type == "quarantine"}
+    assert first.absolute() not in quarantined_sources
+    assert second.absolute() not in quarantined_sources
+    moved_sources = {action.source_path for action in plan.actions if action.action_type == "move"}
+    assert first.absolute() in moved_sources or second.absolute() in moved_sources
+
+
+def test_review_drain_merge_existing_directory_merges_into_existing_target(make_v2_service) -> None:
+    service, config, roots = make_v2_service({"adaptive_placement": {"enabled": True}})
+    target_dir = roots["spaces_root"] / "005_교육_학습"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "already-there.txt").write_text("old", encoding="utf-8")
+
+    incoming_dir = config.adaptive_review_root / "005-교육-학습"
+    incoming_dir.mkdir(parents=True, exist_ok=True)
+    incoming_file = incoming_dir / "리눅스2급2차압축원본.zip"
+    incoming_file.write_text("payload", encoding="utf-8")
+
+    original_classify = service.classifier.classify
+
+    def classify_as_merge_existing(_node):
+        return ClassificationResult(
+            placement_mode="merge_existing",
+            target_path="005_교육_학습",
+            confidence=0.9,
+            rationale="merged into an existing similar folder using filename and content similarity",
+            source="heuristic",
+            review_required=False,
+            metadata={"adaptive_match": True},
+            space="personal",
+            stream="adaptive",
+            domain="005_교육_학습",
+            focus="005_교육_학습",
+            asset_type="misc",
+        )
+
+    service.classifier.classify = classify_as_merge_existing  # type: ignore[method-assign]
+    try:
+        plan, _ = service.run_command(command="review-drain", apply_requested=True)
+    finally:
+        service.classifier.classify = original_classify  # type: ignore[method-assign]
+
+    assert plan is not None
+    moves = [action for action in plan.actions if action.action_type == "move"]
+    assert len(moves) == 1
+    assert moves[0].destination_path == target_dir
+    assert not (roots["spaces_root"] / "005_교육_학습-2").exists()
+    assert (target_dir / incoming_file.name).exists()
+    assert not incoming_dir.exists()
+
+
 def test_archive_manifest_is_created_and_undo_restores_files(make_v2_service) -> None:
     service, config, roots = make_v2_service()
     canonical_dir = roots["spaces_root"] / "personal" / "resources" / "research" / "robotics" / "docs"
@@ -631,6 +717,202 @@ def test_adaptive_mode_moves_unmatched_archives_and_code_into_hidden_review(make
     assert notebook_destinations
     assert not archive_wrapper.exists()
     assert not notebook_wrapper.exists()
+
+
+def test_adaptive_mode_routes_watch_archives_into_existing_archive_bucket(make_v2_service) -> None:
+    service, _, roots = make_v2_service(
+        {
+            "adaptive_placement": {
+                "enabled": True,
+                "hidden_review_relative": "adaptive-review",
+            },
+            "pattern_overrides": [],
+        }
+    )
+    archive_root = roots["spaces_root"] / "004_압축_원본"
+    linux_bucket = archive_root / "01_리눅스_압축원본"
+    linux_bucket.mkdir(parents=True, exist_ok=True)
+
+    archive_file = roots["watch_root"] / "리눅스2급2차압축원본.zip"
+    archive_file.parent.mkdir(parents=True, exist_ok=True)
+    archive_file.write_text("zip payload", encoding="utf-8")
+
+    plan, _ = service.run_command(command="apply", apply_requested=False)
+
+    assert plan is not None
+    moves = [action for action in plan.actions if action.action_type == "move" and action.source_path == archive_file.absolute()]
+    assert len(moves) == 1
+    assert moves[0].destination_path == linux_bucket / archive_file.name
+
+
+def test_adaptive_mode_numbered_taxonomy_merges_forms_into_existing_subtopic(make_v2_service) -> None:
+    service, _, roots = make_v2_service(
+        {
+            "adaptive_placement": {
+                "enabled": True,
+                "hidden_review_relative": "adaptive-review",
+            },
+            "pattern_overrides": [],
+        }
+    )
+    top = roots["spaces_root"] / "001_제안_산학_루키"
+    sub = top / "01_루키_제안서"
+    sub.mkdir(parents=True, exist_ok=True)
+
+    candidate = roots["watch_root"] / "루키_도전제안서_양식.hwpx"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_text("proposal form", encoding="utf-8")
+
+    plan, _ = service.run_command(command="apply", apply_requested=False)
+
+    assert plan is not None
+    moves = [action for action in plan.actions if action.action_type == "move" and action.source_path == candidate.absolute()]
+    assert len(moves) == 1
+    assert moves[0].destination_path == sub / candidate.name
+
+
+def test_adaptive_mode_numbered_taxonomy_creates_two_digit_subtopic_for_periodic_docs(make_v2_service) -> None:
+    service, _, roots = make_v2_service(
+        {
+            "adaptive_placement": {
+                "enabled": True,
+                "hidden_review_relative": "adaptive-review",
+            },
+            "pattern_overrides": [],
+        }
+    )
+    top = roots["spaces_root"] / "001_제안_산학_루키"
+    (top / "01_무관_폴더").mkdir(parents=True, exist_ok=True)
+
+    candidate = roots["watch_root"] / "루키_도전제안서_2026-04.hwpx"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_text("periodic proposal", encoding="utf-8")
+
+    plan, _ = service.run_command(command="apply", apply_requested=False)
+
+    assert plan is not None
+    moves = [action for action in plan.actions if action.action_type == "move" and action.source_path == candidate.absolute()]
+    assert len(moves) == 1
+    destination = moves[0].destination_path
+    assert destination is not None
+    assert destination.parent.parent == top
+    assert destination.parent.name.startswith("02_")
+    assert "2026-04" in destination.parent.name
+
+
+def test_adaptive_mode_numbered_taxonomy_prefers_watch_parent_context_over_image_noise(make_v2_service, monkeypatch) -> None:
+    service, _, roots = make_v2_service(
+        {
+            "adaptive_placement": {
+                "enabled": True,
+                "hidden_review_relative": "adaptive-review",
+            },
+            "pattern_overrides": [],
+        }
+    )
+    service_subtopic = roots["spaces_root"] / "006_서비스_정의" / "01_서비스_정의서"
+    service_subtopic.mkdir(parents=True, exist_ok=True)
+
+    photo_subtopic = roots["spaces_root"] / "008_사진" / "01_스크린샷"
+    photo_subtopic.mkdir(parents=True, exist_ok=True)
+    for index in range(3):
+        (photo_subtopic / f"shot-{index}.png").write_text("img", encoding="utf-8")
+
+    candidate = (
+        roots["watch_root"]
+        / "organizer_live_test_20260406_023453"
+        / "006_서비스_정의"
+        / "01_서비스_정의서"
+        / "서비스_기획_요약_20260403.docx"
+    )
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_text("spec payload", encoding="utf-8")
+
+    monkeypatch.setattr(service.classifier, "_content_hint", lambda _path: "image screenshot")
+
+    plan, _ = service.run_command(command="apply", apply_requested=False)
+
+    assert plan is not None
+    moves = [action for action in plan.actions if action.action_type == "move" and action.source_path == candidate.absolute()]
+    assert len(moves) == 1
+    assert moves[0].destination_path == service_subtopic / candidate.name
+
+
+def test_adaptive_mode_numbered_top_level_creation_uses_three_digits(make_v2_service) -> None:
+    service, _, roots = make_v2_service(
+        {
+            "adaptive_placement": {
+                "enabled": True,
+                "hidden_review_relative": "adaptive-review",
+            },
+            "pattern_overrides": [],
+        }
+    )
+    (roots["spaces_root"] / "001_제안_산학_루키").mkdir(parents=True, exist_ok=True)
+    (roots["spaces_root"] / "002_데이터_분석").mkdir(parents=True, exist_ok=True)
+
+    bundle = roots["watch_root"] / "신규_회의_번들"
+    bundle.mkdir(parents=True, exist_ok=True)
+    (bundle / "회의록.txt").write_text("minutes", encoding="utf-8")
+
+    node = service._index_path(bundle)  # type: ignore[attr-defined]
+    generated = service.classifier._adaptive_new_top_level_name(node)  # type: ignore[attr-defined]
+
+    assert generated is not None
+    assert generated.startswith("003_")
+
+
+def test_watch_llm_keeps_adaptive_archive_in_review_staging(make_v2_service, monkeypatch) -> None:
+    service, _, roots = make_v2_service(
+        {
+            "llm": {
+                "enable_for_watch": True,
+            },
+        }
+    )
+    archive_file = roots["watch_root"] / "리눅스2급2차압축원본.zip"
+    archive_file.parent.mkdir(parents=True, exist_ok=True)
+    archive_file.write_text("zip payload", encoding="utf-8")
+    node = service._index_path(archive_file)  # type: ignore[attr-defined]
+    current = ClassificationResult(
+        placement_mode="review_only",
+        target_path="review/리눅스2급1차족보new/archives",
+        confidence=0.52,
+        rationale="ambiguous adaptive placement is staged in hidden review",
+        source="heuristic",
+        review_required=True,
+        metadata={"adaptive_review": True, "destination_root": "review_staging"},
+        stream="review",
+        domain="review",
+        focus="리눅스2급1차족보new",
+        asset_type="archives",
+    )
+
+    monkeypatch.setattr(
+        service.classifier._llm_controller,
+        "invoke",
+        lambda **_kwargs: SimpleNamespace(
+            payload={
+                "placement_mode": "direct",
+                "target_path": "obsidian/004-organizer/eb-a3-8c-ec-9e-ac-ec-9e-98-eb-a5-4945cd",
+                "create_folders": [],
+                "confidence": 0.98,
+                "reason": "route zip into organizer root",
+                "alternatives": [],
+            },
+            provider_used="groq",
+            provider_attempts=[{"provider": "groq", "status": "ok", "attempt": 1}],
+            cloud_provider_used=True,
+        ),
+    )
+
+    service.classifier.begin_batch("watch")
+    service.classifier._pending_node = node  # type: ignore[attr-defined]
+    result = service.classifier._llm_fallback(node, current)
+
+    assert result.placement_mode == "review_only"
+    assert result.target_path == "review/리눅스2급1차족보new/archives"
+    assert result.metadata.get("destination_root") == "review_staging"
 
 
 def test_review_drain_moves_hidden_review_bundle_into_documents(make_v2_service) -> None:

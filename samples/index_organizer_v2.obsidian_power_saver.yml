@@ -160,7 +160,7 @@ repair_defaults:
   fallback_focus: unsorted
 
 naming:
-  delimiter: kebab-case
+  delimiter: snake-case
   max_stem_length: 80
   max_segment_length: 40
   max_path_length: 240
