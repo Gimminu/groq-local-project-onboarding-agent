@@ -199,13 +199,17 @@ def _launchctl(args: list[str], allow_failure: bool = False) -> None:
 
 def _label_loaded(label: str) -> bool:
     domain = f"gui/{os.getuid()}"
-    completed = subprocess.run(
-        ["launchctl", "print", f"{domain}/{label}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            ["launchctl", "print", f"{domain}/{label}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        # launchctl is macOS-specific and absent in container/Linux runtimes.
+        return False
     return completed.returncode == 0
 
 

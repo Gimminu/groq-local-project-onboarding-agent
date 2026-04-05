@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "groq-mcp-mac-agent"
+version = "0.1.0"
+description = "Findability-first folder organizer and MCP onboarding CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "groq",
+  "google-generativeai>=0.3.0",
+  "mcp>=1.0.0,<2",
+  "python-dotenv>=1.0.0",
+  "PyYAML>=6.0.0",
+  "watchdog>=4.0.0,<7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0,<9"]
+
+[project.scripts]
+index-organizer = "index_organizer:main"
+quick-organizer = "quick_organizer:main"
+mcp-onboard-agent = "main:main"
+
+[tool.setuptools]
+py-modules = ["index_organizer", "organizer", "main", "quick_organizer", "fix_classifier"]
+
+[tool.setuptools.packages.find]
+include = ["app*", "scripts*"]

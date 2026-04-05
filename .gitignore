@@ -3,6 +3,10 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+*.egg-info/
+build/
+dist/
+.docker-sandbox/
 .DS_Store
 *.DS_Store
 .audit/

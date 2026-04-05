@@ -116,3 +116,16 @@ def test_install_launch_agents_reloads_running_service_even_when_plist_is_unchan
     plist_path = tmp_path / "Library" / "LaunchAgents" / "com.example.index-organizer.v2.service.plist"
     assert installed == {"service": plist_path}
     assert load_calls == [("com.example.index-organizer.v2.service", plist_path)]
+
+
+def test_label_loaded_returns_false_when_launchctl_is_unavailable(monkeypatch) -> None:
+    class DummySubprocess:
+        PIPE = launchd_module.subprocess.PIPE
+
+        @staticmethod
+        def run(*_args, **_kwargs):
+            raise FileNotFoundError("launchctl not found")
+
+    monkeypatch.setattr(launchd_module, "subprocess", DummySubprocess)
+
+    assert launchd_module._label_loaded("com.example.index-organizer.v2.service") is False

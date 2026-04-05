@@ -151,3 +151,73 @@ The job now references the provided file and will run at every login or reboot. 
 ```bash
 /Users/giminu0930/Documents/.venv/bin/python index_organizer.py service-status
 ```
+
+## Cleanup Direction
+
+- GUI entrypoint(`gui/organizer_gui.py`)는 제거하고 CLI 중심 운영으로 통일했습니다.
+- `outputs/`는 런타임 산출물 보관용이며 git에는 `.gitkeep`, `README.md`만 추적합니다.
+- `scripts/`는 Documents/Obsidian 이관 및 감사 스크립트만 유지합니다.
+
+## Installable CLI
+
+이제 로컬 설치형으로 바로 사용할 수 있습니다.
+
+```bash
+cd /Users/giminu0930/projects/workspace/groq-mcp-mac-agent/code
+python3 -m pip install -e .
+
+index-organizer status --config samples/index_organizer_v2.obsidian_documents.yml
+quick-organizer status --config samples/index_organizer_v2.obsidian_documents.yml
+mcp-onboard-agent --help
+```
+
+`requirements.txt` 기반 설치를 유지하고 싶다면 기존 방식도 그대로 동작합니다.
+
+## Docker Usage (Optional)
+
+Docker는 launchd 대체가 아니라, 수동/배치 실행을 단순화하는 용도로 권장합니다.
+
+### Beginner Quickstart (recommended)
+
+Docker를 처음 쓰는 경우, 아래 3단계만 실행하면 됩니다.
+
+```bash
+cd /Users/giminu0930/projects/workspace/groq-mcp-mac-agent/code
+bash scripts/docker_easy.sh init
+bash scripts/docker_easy.sh build
+bash scripts/docker_easy.sh status
+```
+
+참고: Docker 모드에서 `status`의 `service_loaded=false`는 정상입니다. 해당 필드는 macOS `launchd` 서비스 상태를 의미하며, 컨테이너 내부에는 `launchd`가 없습니다.
+
+기존에 예전 버전 스크립트로 `init`를 했었다면, 아래를 한 번 더 실행해서 샌드박스 config를 최신 형태로 마이그레이션하세요.
+
+```bash
+bash scripts/docker_easy.sh init
+```
+
+테스트 파일을 `/.docker-sandbox/data/inbox/`에 넣고 아래를 순서대로 실행하세요.
+
+```bash
+bash scripts/docker_easy.sh plan
+bash scripts/docker_easy.sh apply
+```
+
+이 방식은 기본적으로 샌드박스 경로만 사용하므로 `~/Documents`를 직접 건드리지 않습니다.
+
+```bash
+cd /Users/giminu0930/projects/workspace/groq-mcp-mac-agent/code
+docker build -t folder-organizer:v2 .
+
+docker run --rm -it \
+  -v "$PWD/samples/index_organizer_v2.obsidian_documents.yml:/config/folder-organizer-v2.yml:ro" \
+  folder-organizer:v2 status --config /config/folder-organizer-v2.yml
+```
+
+실제 파일 시스템에 적용하려면 대상 경로를 컨테이너에 마운트하고 `service-tick --apply`를 실행하면 됩니다.
+
+## MCP-Friendly Operation
+
+- MCP에서 호출하기 쉬운 커맨드는 `index-organizer status`, `index-organizer plan`, `index-organizer service-tick` 입니다.
+- service 상태 JSON이 필요하면 `index_organizer.py service-status`를 사용하면 됩니다.
+- 실행 리포트는 config의 `state_dir/reports`에 생성되므로 MCP에서 파일 경로를 읽어 후처리하기 쉽습니다.
