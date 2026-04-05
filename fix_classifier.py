@@ -1,24 +1,15 @@
+from __future__ import annotations
+
+import argparse
 import re
-with open("/Users/giminu0930/projects/workspace/groq-mcp-mac-agent/code/app/index_v2/classifier.py", "r") as f:
-    content = f.read()
+from pathlib import Path
 
-# 1. Update _llm_prompt_payload
-# Find the start of "allowed": {
-start_idx = content.find('"allowed": {')
-# Find the start of "constraints": {
-end_idx = content.find('"constraints": {')
 
-if start_idx != -1 and end_idx != -1:
-    new_allowed = '"allowed": {\n                "modes": list(PLACEMENT_MODES),\n            },\n            '
-    content = content[:start_idx] + new_allowed + content[end_idx:]
+def target_file(default_root: Path) -> Path:
+    return default_root / "app" / "index_v2" / "classifier.py"
 
-# Update output schema
-schema_old = '"output_schema": [\n                "anchor",\n                "mode",\n                "target_path",\n                "space",\n                "stream",\n                "domain",\n                "focus",\n                "asset_type",\n                "confidence",\n                "rationale",\n                "alternatives",\n                "depth_score",\n            ]'
-schema_new = '"output_schema": [\n                "placement_mode",\n                "target_path",\n                "create_folders",\n                "confidence",\n                "reason",\n                "alternatives",\n            ]'
-content = content.replace(schema_old, schema_new)
 
-# 2. Update _sanitize_llm_payload
-def sanitize_replacement(match):
+def _sanitize_replacement(_match: re.Match[str]) -> str:
     return """def _sanitize_llm_payload(self, payload: dict[str, Any], *, current: ClassificationResult) -> dict[str, Any]:
         if not isinstance(payload, dict):
             return current.to_dict()
@@ -85,8 +76,49 @@ def sanitize_replacement(match):
         }
 """
 
-pattern = re.compile(r'def _sanitize_llm_payload\(self, payload: dict\[str, Any\], \*, current: ClassificationResult\) -> dict\[str, Any\]:.*?(?=    def _review_result)', re.DOTALL)
-content = pattern.sub(sanitize_replacement, content)
 
-with open("/Users/giminu0930/projects/workspace/groq-mcp-mac-agent/code/app/index_v2/classifier.py", "w") as f:
-    f.write(content)
+def apply_fix(file_path: Path) -> None:
+    content = file_path.read_text(encoding="utf-8")
+
+    # 1. Update _llm_prompt_payload
+    start_idx = content.find('"allowed": {')
+    end_idx = content.find('"constraints": {')
+    if start_idx != -1 and end_idx != -1:
+        new_allowed = '"allowed": {\n                "modes": list(PLACEMENT_MODES),\n            },\n            '
+        content = content[:start_idx] + new_allowed + content[end_idx:]
+
+    # 2. Update output schema
+    schema_old = '"output_schema": [\n                "anchor",\n                "mode",\n                "target_path",\n                "space",\n                "stream",\n                "domain",\n                "focus",\n                "asset_type",\n                "confidence",\n                "rationale",\n                "alternatives",\n                "depth_score",\n            ]'
+    schema_new = '"output_schema": [\n                "placement_mode",\n                "target_path",\n                "create_folders",\n                "confidence",\n                "reason",\n                "alternatives",\n            ]'
+    content = content.replace(schema_old, schema_new)
+
+    # 3. Update _sanitize_llm_payload
+    pattern = re.compile(
+        r'def _sanitize_llm_payload\(self, payload: dict\[str, Any\], \*, current: ClassificationResult\) -> dict\[str, Any\]:.*?(?=    def _review_result)',
+        re.DOTALL,
+    )
+    content = pattern.sub(_sanitize_replacement, content)
+
+    file_path.write_text(content, encoding="utf-8")
+    print(f"updated={file_path}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Patch classifier.py with constrained LLM payload schema")
+    parser.add_argument(
+        "--file",
+        default=str(target_file(Path(__file__).resolve().parent)),
+        help="Path to classifier.py",
+    )
+    args = parser.parse_args(argv)
+
+    path = Path(args.file).expanduser().resolve()
+    if not path.exists():
+        raise SystemExit(f"error: file not found: {path}")
+
+    apply_fix(path)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

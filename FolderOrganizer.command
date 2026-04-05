@@ -25,6 +25,7 @@ while true; do
   echo "8) V2 서비스 상태 보기"
   echo "9) 서비스 끄기"
   echo "10) repo outputs 정리"
+  echo "11) 폴더 이동 후 경로 재연결"
   echo "q) Quit"
   echo
   read "choice?Select: "
@@ -59,6 +60,9 @@ while true; do
       ;;
     10)
       "$PYTHON_BIN" "$REPO_DIR/quick_organizer.py" repair-outputs
+      ;;
+    11)
+      "$REPO_DIR/scripts/after_repo_move.sh"
       ;;
     q|Q)
       exit 0
