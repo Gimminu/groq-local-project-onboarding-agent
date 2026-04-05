@@ -24,6 +24,7 @@ dev = ["pytest>=8.0.0,<9"]
 index-organizer = "index_organizer:main"
 quick-organizer = "quick_organizer:main"
 mcp-onboard-agent = "main:main"
+release-version = "scripts.release_version:main"
 
 [tool.setuptools]
 py-modules = ["index_organizer", "organizer", "main", "quick_organizer", "fix_classifier"]

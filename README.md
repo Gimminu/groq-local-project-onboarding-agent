@@ -196,6 +196,68 @@ cd /Users/giminu0930/projects/workspace/groq-mcp-mac-agent/code
 - `save`: `dist/*.tar` 아카이브 생성 (오프라인 전달 가능)
 - `push`: 레지스트리 푸시
 
+## Practical Automation Pack
+
+### 1) Release Version Management
+
+버전 확인/증가를 스크립트로 통일했습니다.
+
+```bash
+cd /Users/giminu0930/projects/workspace/groq-mcp-mac-agent/code
+python3 scripts/release_version.py show
+python3 scripts/release_version.py bump --part patch
+python3 scripts/release_version.py bump --part patch --apply --update-changelog
+```
+
+패키지 설치 후에는 아래 커맨드도 가능합니다.
+
+```bash
+release-version show
+release-version bump --part minor --apply --update-changelog
+```
+
+### 2) Deploy Automation (GitHub Actions)
+
+워크플로우 파일: `.github/workflows/docker-release.yml`
+
+자동 트리거:
+
+- `v*` 태그 push 시 GHCR 배포
+- Actions 수동 실행(`workflow_dispatch`) 시 입력한 태그로 배포
+
+생성 이미지 예시:
+
+- `ghcr.io/<owner>/folder-organizer:v0.2.0`
+- `ghcr.io/<owner>/folder-organizer:latest` (태그 배포 시)
+
+### 3) Power Saver Profile
+
+샘플 파일:
+
+- `samples/index_organizer_v2.obsidian_documents.yml` (standard)
+- `samples/index_organizer_v2.obsidian_power_saver.yml` (power-saver)
+
+프로필 적용 스크립트:
+
+```bash
+cd /Users/giminu0930/projects/workspace/groq-mcp-mac-agent/code
+./scripts/set_power_profile.sh power-saver ~/folder-organizer-v2.yml
+```
+
+서비스 재적용 없이 설정 파일만 바꾸고 싶다면:
+
+```bash
+./scripts/set_power_profile.sh power-saver ~/folder-organizer-v2.yml --no-reload
+```
+
+표준으로 복귀:
+
+```bash
+./scripts/set_power_profile.sh standard ~/folder-organizer-v2.yml
+```
+
+스크립트는 기존 설정을 timestamp 백업한 뒤 프로필을 복사하고, macOS에서는 `service-install`로 서비스 설정도 갱신합니다.
+
 ## Docker Usage (Optional)
 
 Docker는 launchd 대체가 아니라, 수동/배치 실행을 단순화하는 용도로 권장합니다.

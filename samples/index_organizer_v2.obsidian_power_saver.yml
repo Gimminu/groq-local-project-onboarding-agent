@@ -1,0 +1,316 @@
+spaces_root: ~/Documents/Obsidian/Organizer
+state_dir: ~/Library/Application Support/FolderOrganizerV2-Obsidian
+
+watch_roots:
+  - ~/Documents/Obsidian/Organizer
+
+root_spaces:
+  "~/Documents/Obsidian/Organizer": main
+
+spaces:
+  - main
+
+streams:
+  - inbox
+  - projects
+  - areas
+  - resources
+  - archive
+  - review
+  - system
+
+domains:
+  - unknown
+  - apps
+  - embedded
+  - workspace
+  - experiments
+  - legacy-review
+  - education
+  - admin
+  - coding
+  - finance
+  - research
+  - legal
+  - templates
+
+domain_policy:
+  pinned_domains:
+    - unknown
+    - apps
+    - embedded
+    - workspace
+    - experiments
+    - legacy-review
+    - education
+    - admin
+    - coding
+    - finance
+    - research
+    - legal
+    - templates
+  allow_dynamic_domains: false
+  new_domain_gate:
+    min_items_in_window: 3
+    window_days: 14
+    min_confidence: 0.85
+    min_independent_signals: 2
+    max_new_domains_per_week: 2
+    banned_domain_names:
+      - general
+      - misc
+      - other
+      - temp
+      - stuff
+      - category
+      - categories
+      - etc
+      - unknown
+      - unsorted
+      - folder
+      - new-folder
+      - new_folder
+      - 일반
+      - 기타
+      - 임시
+      - 카테고리
+      - 미분류
+
+adaptive_placement:
+  enabled: true
+  hidden_review_relative: adaptive-review
+  max_existing_folder_depth: 3
+  min_existing_folder_score: 2
+  review_layout: asset-first
+  reserved_top_level_names:
+    - inbox
+    - projects
+    - areas
+    - resources
+    - archive
+    - review
+    - system
+  blocked_top_level_names:
+    - download
+    - downloads
+    - desktop
+    - documents
+    - direct
+    - imported-archives
+    - null
+    - tmp
+    - temp
+    - review
+    - docs
+    - notes
+    - code
+    - data
+    - assets
+    - archives
+    - forms
+    - exports
+    - installers
+    - results
+    - dropbox
+    - _dropbox
+  blocked_top_level_fragments:
+    - cache
+    - artifact
+    - artifacts
+  stabilize_existing_spaces_items: true
+  auto_drain_hidden_review: true
+  hidden_review_drain_interval_seconds: 600
+  hidden_review_max_items_per_tick: 16
+
+asset_types:
+  - misc
+  - docs
+  - slides
+  - notes
+  - forms
+  - code
+  - data
+  - output
+  - assets
+  - exports
+  - installers
+  - archives
+
+default_space: main
+include_space_level: false
+move_uncertain_items: false
+review_mode: flat
+
+protected_project_internal_roots:
+  - projects/*/*/code
+  - projects/*/*/code/*
+  - projects/*/*/code/**
+
+protected_stream_roots:
+  - projects
+  - photos
+  - calendar
+  - dashboard
+  - hubs
+  - tags
+  - templates
+  - tools
+
+repair_defaults:
+  fallback_focus: unsorted
+
+naming:
+  delimiter: kebab-case
+  max_stem_length: 80
+  max_segment_length: 40
+  max_path_length: 240
+  unknown_domain: unknown
+  unsorted_focus: unsorted
+  misc_asset_type: misc
+
+groq:
+  enabled: true
+  model: llama-3.1-8b-instant
+  confidence_threshold: 0.75
+  max_siblings: 20
+
+llm:
+  preferred_provider: groq
+  fallback_to_other_cloud: true
+  fallback_to_ollama: true
+  enable_for_watch: false
+  enable_llm_first: false
+  max_items_per_watch_tick: 2
+  retry_attempts: 2
+  min_request_interval_seconds:
+    groq: 3
+    gemini: 5
+    ollama: 0
+  backoff_seconds:
+    - 15
+    - 45
+  provider_cooldown_seconds: 600
+  ollama:
+    base_url: http://127.0.0.1:11434
+    model: qwen2.5:3b-instruct
+    healthcheck_timeout_seconds: 2
+
+watch:
+  poll_interval_seconds: 60
+  stable_observation_seconds: 45
+  staging_age_seconds: 900
+  backlog_rescan_seconds: 1800
+
+archive:
+  stale_days: 180
+  manifest_hashes: true
+
+deletion:
+  installer_grace_days: 30
+  export_stale_days: 60
+  quarantine_ttl_days: 30
+
+reporting:
+  write_noop_watch_reports: false
+  watch_retention_days: 7
+  watch_max_report_pairs: 80
+
+cleanup:
+  remove_metadata_artifacts: true
+  prune_empty_stream_roots: false
+  prune_empty_watch_dirs: false
+  noncode_name_repair_streams:
+    - areas
+    - resources
+    - archive
+    - review
+
+repair_code_names:
+  auto_apply_scopes:
+    - projects/legacy-review
+
+service:
+  tick_interval_seconds: 180
+  maintenance_interval_seconds: 10800
+  archive_interval_seconds: 172800
+  startup_apply: false
+  startup_archive: false
+
+migration_rules:
+  - legacy_root_name: 00_Inbox
+    stream: inbox
+  - legacy_root_name: 01_Projects
+    stream: projects
+    domain: coding
+    asset_type: code
+  - legacy_root_name: 02_Areas
+    stream: areas
+  - legacy_root_name: 03_Resources
+    stream: resources
+  - legacy_root_name: 04_Archive
+    stream: archive
+    asset_type: archives
+
+pattern_overrides:
+  - pattern: "(?i)dashboard|대시보드"
+    domain: workspace
+    stream: resources
+    asset_type: notes
+  - pattern: "(?i)education|course|lecture|class|syllabus|assignment|exam|quiz"
+    domain: education
+    stream: resources
+  - pattern: "(?i)수업|강의|과제|시험|퀴즈|학기|노트"
+    domain: education
+    stream: resources
+  - pattern: "(?i)invoice|receipt|payment|billing|statement|budget|tax|refund|wire|transfer|bank|card|transaction"
+    domain: finance
+    stream: areas
+  - pattern: "(?i)영수증|청구서|결제|지출|예산|세금|환불|이체|거래내역|계좌|카드"
+    domain: finance
+    stream: areas
+  - pattern: "(?i)contract|agreement|nda|terms|policy|regulation|license|consent|authorization"
+    domain: legal
+    stream: areas
+  - pattern: "(?i)계약서|합의서|동의서|약관|규정|라이선스|법률"
+    domain: legal
+    stream: areas
+  - pattern: "(?i)passport|visa|id card|certificate|registration|permit|booking|reservation|hotel|flight|ticket|boarding pass|rent|medical|clinic|hospital|prescription|lab result|test result|insurance claim"
+    domain: admin
+    stream: areas
+  - pattern: "(?i)여권|비자|신분증|증명서|등록|허가|예약|티켓|탑승권|병원|처방|검사결과|보험"
+    domain: admin
+    stream: areas
+  - pattern: "(?i)template|sample|boilerplate|checklist|form"
+    domain: templates
+    stream: resources
+  - pattern: "(?i)템플릿|샘플|체크리스트|서식|양식"
+    domain: templates
+    stream: resources
+
+ignore_names:
+  - .DS_Store
+  - .localized
+  - .Spotlight-V100
+  - .TemporaryItems
+  - .Trashes
+  - .obsidian
+  - .trash
+  - .archive
+  - .attachments
+  - .space
+  - .smart-env
+  - .makemd
+  - .stfolder
+  - .git
+  - .gitignore
+  - .gitattributes
+  - .venv
+  - venv
+  - node_modules
+  - __pycache__
+  - Calendar
+  - Dashboard
+  - Hubs
+  - Tags
+  - Templates
+  - tools
