@@ -173,6 +173,29 @@ mcp-onboard-agent --help
 
 `requirements.txt` 기반 설치를 유지하고 싶다면 기존 방식도 그대로 동작합니다.
 
+## Recommended For This Setup
+
+- 로컬 상시 실행: macOS `launchd` 서비스 사용
+- Docker 사용 범위: 배포용 이미지 빌드/패키징/푸시 전용
+
+즉, 평소 정리는 네이티브 서비스로 돌리고 Docker Desktop은 배포가 필요할 때만 켭니다.
+
+## Docker Deploy Only
+
+배포 전용 Docker 헬퍼:
+
+```bash
+cd /Users/giminu0930/projects/workspace/groq-mcp-mac-agent/code
+./scripts/docker_deploy.sh build
+./scripts/docker_deploy.sh save
+# optional
+./scripts/docker_deploy.sh push ghcr.io/<owner>/folder-organizer:v2
+```
+
+- `build`: 로컬 이미지 빌드 (`folder-organizer:v2`)
+- `save`: `dist/*.tar` 아카이브 생성 (오프라인 전달 가능)
+- `push`: 레지스트리 푸시
+
 ## Docker Usage (Optional)
 
 Docker는 launchd 대체가 아니라, 수동/배치 실행을 단순화하는 용도로 권장합니다.
