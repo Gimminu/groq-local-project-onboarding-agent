@@ -156,12 +156,47 @@ class IndexExecutor:
         assert action.source_path is not None
         assert action.destination_path is not None
         original_source = action.source_path
-        destination = self._unique_destination(action.destination_path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(original_source), str(destination))
+        destination = action.destination_path
+
+        if self._should_merge_into_existing_dir(action, original_source, destination):
+            self._merge_directory_contents(source=original_source, destination=destination)
+        else:
+            destination = self._unique_destination(destination)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(original_source), str(destination))
+
         action.source_path = original_source
         action.destination_path = destination
         return destination
+
+    def _should_merge_into_existing_dir(self, action: PlannedAction, source: Path, destination: Path) -> bool:
+        if not source.is_dir() or not destination.exists() or not destination.is_dir():
+            return False
+        classification = action.metadata.get("classification") if isinstance(action.metadata, dict) else None
+        if not isinstance(classification, dict):
+            return False
+        return str(classification.get("placement_mode") or "") == "merge_existing"
+
+    def _merge_directory_contents(self, *, source: Path, destination: Path) -> None:
+        destination.mkdir(parents=True, exist_ok=True)
+        for child in sorted(source.iterdir(), key=lambda path: path.name.lower()):
+            target = destination / child.name
+            if child.is_dir() and target.exists() and target.is_dir():
+                self._merge_directory_contents(source=child, destination=target)
+                try:
+                    child.rmdir()
+                except OSError:
+                    pass
+                continue
+
+            final_target = self._unique_destination(target)
+            final_target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(child), str(final_target))
+
+        try:
+            source.rmdir()
+        except OSError:
+            pass
 
     def _apply_quarantine(self, action: PlannedAction) -> Path:
         destination = self._apply_move(action)

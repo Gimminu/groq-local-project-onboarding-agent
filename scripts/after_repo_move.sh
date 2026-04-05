@@ -2,10 +2,45 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_PARENT_DIR="$(cd "$REPO_DIR/.." && pwd)"
 DEFAULT_CONFIG="$HOME/folder-organizer-v2.yml"
+LIVE_CONFIG_CANDIDATE="$REPO_PARENT_DIR/folder-organizer-v2.live.yml"
+SAMPLE_CONFIG="$REPO_DIR/samples/index_organizer_v2.obsidian_documents.yml"
 CONFIG_PATH=""
 SKIP_INSTALL=false
 SKIP_SERVICE=false
+
+pick_default_config() {
+  if [[ -f "$DEFAULT_CONFIG" ]]; then
+    echo "$DEFAULT_CONFIG"
+    return
+  fi
+
+  if [[ -f "$LIVE_CONFIG_CANDIDATE" ]]; then
+    echo "$LIVE_CONFIG_CANDIDATE"
+    return
+  fi
+
+  echo "$SAMPLE_CONFIG"
+}
+
+resolve_config_path() {
+  local requested_path="$1"
+
+  if [[ -f "$requested_path" ]]; then
+    echo "$requested_path"
+    return
+  fi
+
+  if [[ "$(basename "$requested_path")" == "folder-organizer-v2.yml" ]] && [[ -f "$LIVE_CONFIG_CANDIDATE" ]]; then
+    echo "WARN: requested config not found: $requested_path" >&2
+    echo "WARN: using fallback config: $LIVE_CONFIG_CANDIDATE" >&2
+    echo "$LIVE_CONFIG_CANDIDATE"
+    return
+  fi
+
+  echo "$requested_path"
+}
 
 print_help() {
   cat <<'EOF'
@@ -15,8 +50,8 @@ Usage:
   ./scripts/after_repo_move.sh [--config <path>] [--skip-install] [--skip-service]
 
 Options:
-  --config <path>   Organizer config path (default: ~/folder-organizer-v2.yml if exists,
-                    otherwise samples/index_organizer_v2.obsidian_documents.yml)
+  --config <path>   Organizer config path (default order:
+                    ~/folder-organizer-v2.yml -> ../folder-organizer-v2.live.yml -> samples/...)
   --skip-install    Skip editable pip reinstall
   --skip-service    Skip launchd service reinstall
 
@@ -58,15 +93,16 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$CONFIG_PATH" ]]; then
-  if [[ -f "$DEFAULT_CONFIG" ]]; then
-    CONFIG_PATH="$DEFAULT_CONFIG"
-  else
-    CONFIG_PATH="$REPO_DIR/samples/index_organizer_v2.obsidian_documents.yml"
-  fi
+  CONFIG_PATH="$(pick_default_config)"
+else
+  CONFIG_PATH="$(resolve_config_path "$CONFIG_PATH")"
 fi
 
 if [[ ! -f "$CONFIG_PATH" ]]; then
   echo "ERROR: config not found: $CONFIG_PATH"
+  echo "hint=Try one of:" 
+  echo "  --config $LIVE_CONFIG_CANDIDATE"
+  echo "  --config $SAMPLE_CONFIG"
   exit 1
 fi
 
