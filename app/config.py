@@ -7,7 +7,47 @@ from pathlib import Path
 
 from app.errors import AppError
 
-DEFAULT_MCP_CONFIG_PATH = Path(__file__).resolve().parents[2] / "mcp" / ".vscode" / "mcp.json"
+
+def get_default_mcp_config_path() -> Path:
+    env_override = os.getenv("MCP_CONFIG_PATH")
+    candidates: list[Path] = []
+    if env_override:
+        candidates.append(Path(env_override).expanduser())
+
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates.extend(
+        [
+            repo_root / "mcp" / ".vscode" / "mcp.json",
+            repo_root.parent / "mcp" / ".vscode" / "mcp.json",
+            Path.home()
+            / "Documents"
+            / "projects"
+            / "apps"
+            / "mcp"
+            / ".vscode"
+            / "mcp.json",
+            Path.home()
+            / "Documents"
+            / "projects"
+            / "legacy-review"
+            / "mcp-legacy-organizer"
+            / "code"
+            / "mcp"
+            / ".vscode"
+            / "mcp.json",
+        ]
+    )
+
+    for candidate in candidates:
+        expanded = candidate.expanduser()
+        if expanded.exists():
+            return expanded.resolve()
+
+    # Return primary expected location if none exist, so caller gets a clear error message.
+    return (repo_root / "mcp" / ".vscode" / "mcp.json").resolve()
+
+
+DEFAULT_MCP_CONFIG_PATH = get_default_mcp_config_path()
 
 
 @dataclass(frozen=True)
@@ -34,6 +74,11 @@ def load_mcp_servers(config_path: Path) -> dict[str, ServerConfig]:
     workspace_root = _workspace_root(config_path)
     config_dir = config_path.parent
     resolved: dict[str, ServerConfig] = {}
+    default_env = {
+        "GRPC_VERBOSITY": os.getenv("GRPC_VERBOSITY", "NONE"),
+        "GLOG_minloglevel": os.getenv("GLOG_minloglevel", "3"),
+        "MCP_QUIET_LOGS": os.getenv("MCP_QUIET_LOGS", "1"),
+    }
 
     for name, raw_server in servers.items():
         if not isinstance(raw_server, dict):
@@ -64,7 +109,7 @@ def load_mcp_servers(config_path: Path) -> dict[str, ServerConfig]:
                 _resolve_arg_path(arg, workspace_root, config_dir)
                 for arg in raw_args
             ],
-            env={**os.environ, **raw_env},
+            env={**os.environ, **default_env, **raw_env},
         )
 
     return resolved

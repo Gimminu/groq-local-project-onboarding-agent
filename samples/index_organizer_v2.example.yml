@@ -1,0 +1,271 @@
+spaces_root: ~/Documents
+state_dir: ~/Library/Application Support/FolderOrganizerV2
+
+watch_roots:
+  - ~/Desktop
+  - ~/Downloads
+  - ~/Documents
+
+migration_roots:
+  - ~/Downloads
+  - ~/Desktop
+
+root_spaces:
+  "~/Downloads": main
+  "~/Desktop": main
+
+spaces:
+  - main
+
+streams:
+  - inbox
+  - projects
+  - areas
+  - resources
+  - archive
+  - review
+  - system
+
+domains:
+  - unknown
+  - apps
+  - embedded
+  - workspace
+  - experiments
+  - legacy-review
+  - education
+  - admin
+  - coding
+  - finance
+  - research
+  - legal
+  - templates
+
+domain_policy:
+  pinned_domains:
+    - unknown
+    - apps
+    - embedded
+    - workspace
+    - experiments
+    - legacy-review
+    - education
+    - admin
+    - coding
+    - finance
+    - research
+    - legal
+    - templates
+  allow_dynamic_domains: true
+  new_domain_gate:
+    min_items_in_window: 3
+    window_days: 14
+    min_confidence: 0.85
+    min_independent_signals: 2
+    max_new_domains_per_week: 2
+    banned_domain_names:
+      - general
+      - misc
+      - other
+      - temp
+      - stuff
+      - category
+      - categories
+      - etc
+      - unknown
+      - unsorted
+      - 일반
+      - 기타
+      - 임시
+      - 카테고리
+      - 미분류
+      - 폴더
+      - 새폴더
+
+adaptive_placement:
+  enabled: false
+  hidden_review_relative: adaptive-review
+  max_existing_folder_depth: 3
+  min_existing_folder_score: 2
+  review_layout: asset-first
+  reserved_top_level_names:
+    - inbox
+    - projects
+    - areas
+    - resources
+    - archive
+    - review
+    - system
+  blocked_top_level_names:
+    - 다운로드
+    - 바탕화면
+    - direct
+    - imported-archives
+    - tmp
+    - 리뷰
+    - docs
+    - notes
+    - code
+    - data
+    - assets
+    - archives
+    - forms
+    - exports
+    - installers
+    - results
+    - 문서
+    - 노트
+    - 코드
+    - 데이터
+    - 미디어
+    - 압축파일
+    - 서식
+    - 결과물
+    - 내보내기
+    - 설치파일
+  blocked_top_level_fragments:
+    - cache
+    - artifact
+    - artifacts
+  stabilize_existing_spaces_items: true
+  auto_drain_hidden_review: true
+  hidden_review_drain_interval_seconds: 900
+  hidden_review_max_items_per_tick: 12
+
+asset_types:
+  - misc
+  - docs
+  - slides
+  - notes
+  - forms
+  - code
+  - data
+  - output
+  - assets
+  - exports
+  - installers
+  - archives
+
+default_space: main
+include_space_level: false
+move_uncertain_items: false
+review_mode: flat
+
+protected_project_internal_roots:
+  - projects/*/*/code
+  - projects/*/*/code/*
+  - projects/*/*/code/**
+
+protected_stream_roots:
+  - projects
+  - photos
+
+repair_defaults:
+  fallback_focus: unsorted
+
+naming:
+  delimiter: kebab-case
+  max_stem_length: 80
+  max_segment_length: 40
+  max_path_length: 240
+  unknown_domain: unknown
+  unsorted_focus: unsorted
+  misc_asset_type: misc
+
+groq:
+  enabled: true
+  model: llama-3.1-8b-instant
+  confidence_threshold: 0.75
+  max_siblings: 20
+
+llm:
+  preferred_provider: groq
+  fallback_to_other_cloud: true
+  fallback_to_ollama: true
+  enable_for_watch: false
+  max_items_per_watch_tick: 2
+  retry_attempts: 2
+  min_request_interval_seconds:
+    groq: 3
+    gemini: 5
+    ollama: 0
+  backoff_seconds:
+    - 15
+    - 45
+  provider_cooldown_seconds: 600
+  ollama:
+    base_url: http://127.0.0.1:11434
+    model: qwen2.5:3b-instruct
+    healthcheck_timeout_seconds: 2
+
+watch:
+  poll_interval_seconds: 10
+  stable_observation_seconds: 30
+  staging_age_seconds: 300
+
+archive:
+  stale_days: 180
+  manifest_hashes: true
+
+deletion:
+  installer_grace_days: 30
+  export_stale_days: 60
+  quarantine_ttl_days: 30
+
+reporting:
+  write_noop_watch_reports: false
+  watch_retention_days: 14
+  watch_max_report_pairs: 200
+
+cleanup:
+  remove_metadata_artifacts: true
+  prune_empty_stream_roots: true
+  prune_empty_watch_dirs: true
+  noncode_name_repair_streams:
+    - areas
+    - resources
+    - archive
+    - review
+
+repair_code_names:
+  auto_apply_scopes:
+    - projects/legacy-review
+
+service:
+  tick_interval_seconds: 60
+  maintenance_interval_seconds: 3600
+  archive_interval_seconds: 86400
+  startup_apply: false
+  startup_archive: false
+
+migration_rules:
+  - legacy_root_name: 00_Inbox
+    stream: inbox
+  - legacy_root_name: 01_Projects
+    stream: projects
+    domain: coding
+    asset_type: code
+  - legacy_root_name: 02_Areas
+    stream: areas
+  - legacy_root_name: 03_Resources
+    stream: resources
+  - legacy_root_name: 04_Archive
+    stream: archive
+    asset_type: archives
+
+pattern_overrides:
+  - pattern: "(?i)education|course|lecture|class|수업|강의"
+    domain: education
+    stream: resources
+  - pattern: "(?i)invoice|receipt|payment|billing|statement|budget|tax|vat|refund|wire|transfer|bank|card|transaction|영수증|청구서|결제|지출|예산|세금|부가세|환불|이체|거래내역|계좌|카드"
+    domain: finance
+    stream: areas
+  - pattern: "(?i)contract|agreement|nda|terms|policy|regulation|license|consent|authorization|법률|계약서|합의서|동의서|위임장|약관|규정|라이선스|특허"
+    domain: legal
+    stream: areas
+  - pattern: "(?i)passport|visa|immigration|residence|id card|certificate|registration|permit|booking|reservation|hotel|flight|ticket|boarding pass|rent|medical|clinic|hospital|prescription|lab result|test result|insurance claim|여권|비자|출입국|거주|신분증|증명서|등본|초본|등록|허가|여행|일정표|예약|숙소|항공|티켓|탑승권|렌트|진료|병원|처방|검사결과|진단서|보험청구|의료"
+    domain: admin
+    stream: areas
+  - pattern: "(?i)template|sample|boilerplate|checklist|form|양식|템플릿|샘플|체크리스트|서식"
+    domain: templates
+    stream: resources

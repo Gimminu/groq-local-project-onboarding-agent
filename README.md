@@ -1,132 +1,153 @@
-# Groq Local Project Onboarding Agent
+# Findability-First Folder Organizer (V2)
 
-Groq API와 MCP를 결합해서 로컬 프로젝트를 빠르게 읽고, 새 팀원이 바로 이해할 수 있는 온보딩 보고서를 만들어주는 Python CLI 에이전트입니다.
+이 프로젝트는 `Desktop`, `Documents`, `Downloads` 폴더를 대상으로, 거대한 분류표(Taxonomy)를 짜맞추는 것이 아니라 **사용자가 파일을 다시 찾을 때 걸리는 클릭/검색/망설임 비용을 최소화(Findability-First)**하는 것을 목표로 합니다.
 
-- 프로젝트 폴더를 읽고 구조, 기술 스택, 실행법, 핵심 파일, 리스크를 정리한다.
+## Core Philosophy: File-Level Precision & Dynamic Routing
 
-## 주요 기능
+이전 방식처럼 고정된 카테고리(Projects/Research 등 Anchor)를 강제하지 않습니다. 매 파일마다 **'어떤 방식으로 배치할지(placement mode)'**를 먼저 고르고, 최적의 깊이(Depth) 내에서 가장 직관적인 경로를 동적으로 제안합니다.
 
-- 프로젝트 폴더 경로만 넣어도 온보딩 요청으로 자동 변환
-- README, `requirements.txt`, `pyproject.toml`, `package.json`, `Makefile`, `Dockerfile`, `.env.example` 등 표준 파일 우선 탐색
-- 기술 스택 요약
-- 실행/테스트 명령 정리
-- 먼저 읽어야 할 핵심 파일 추천
-- 설정 위험 요소 및 미확인 지점 정리
-- 인터랙티브 CLI
-- 분석 로그를 Markdown/JSON으로 저장
+1. **Project Root Protection**: `.git`, `package.json` + `src/` 등이 있는 활성 프로젝트 폴더는 절대 쪼개지 않고 통째로 보호합니다.
+2. **Recursive Leaf Evaluation (최하위 리프 재귀 스캔)**: 무의미한 중간 폴더(`resources/education/...`)를 통째로 옮기지 않고, 무조건 최하위 **개별 파일 단위**로 내려가 LLM이 하나씩 최적의 위치를 판단합니다.
+3. **Dynamic Root Gate**: 미리 정해진 최상위 폴더에 억지로 넣지 않습니다. 필요하다면 새 최상위 폴더를 만들 수 있지만, 무분별한 폴더 생성을 막기 위한 강력한 제명(Gate) 규칙을 통과해야 합니다.
 
-## 폴더 구조
+## Decision Sequence (Strict Order)
+
+## Production System Prompt (English)
 
 ```text
-groq-mcp-mac-agent/
-├── app/
-├── examples/
-├── outputs/
-├── samples/
-├── tests/
-├── .env.example
-├── main.py
-├── README.md
-└── requirements.txt
+You are a file placement engine. Do NOT build a fixed taxonomy.
+Goal: minimize future re-find cost (clicks + uncertainty).
+
+Do NOT require fixed top-level anchors. Top-level folders may be created dynamically,
+but only when clearly beneficial and not generic.
+
+INPUT YOU GET:
+- base_dir (e.g., ~/Documents)
+- item_path, filename, extension, size, timestamps
+- optional: short content hints (first lines / metadata)
+- existing_tree_summary: list of existing folders near base_dir (at least depth 1-3)
+- protected_paths: paths that must not be renamed/moved (project roots, repos, etc.)
+
+STEP 0 — Hard protection:
+If item is inside or is a dependency/system folder, DO NOT MOVE.
+Examples: node_modules, .venv, site-packages, __pycache__, dist, build.
+Return placement_mode = review_only or keep_here. confidence = 1.0.
+
+STEP 1 — Choose PLACEMENT MODE (only one):
+- direct
+- single_file_folder
+- merge_existing
+- review_only
+
+Definitions:
+- direct: filename is specific enough; placing it directly under a nearby folder keeps it easy to find.
+- single_file_folder: filename is specific AND likely to spawn related files (versions, assets, notes); creating a folder named after the file/topic improves refinding.
+- merge_existing: an existing folder clearly matches the same topic/project (high similarity, low ambiguity).
+- review_only: confidence < 0.75 OR any rule conflict OR multiple strong candidates OR depth budget fail.
+
+STEP 2 — Generate 3 candidate target paths (at most 1 may create a NEW top-level folder):
+A) direct candidate (no new folder)
+B) single_file_folder candidate (creates only the leaf folder, named from filename/topic)
+C) merge_existing candidate (pick best existing folder)
+Optional D) create_new_root candidate:
+- Allowed only if A/B/C cannot satisfy depth budget AND the new root name is highly specific.
+- New root name MUST be a short, human-understandable noun phrase.
+- Never create generic roots (general/misc/temp/other/etc).
+
+STEP 3 — Score candidates and pick best.
+Minimize: depth + generic_names + redundancy + ambiguity.
+Maximize: predictability from path names (strong information scent).
+
+Scoring rules (hard constraints):
+- Depth budget: target depth 2-3. Depth 4 => warning. Depth >= 5 => FAIL.
+  If best candidate depth >= 5, return review_only.
+- Banned names (case-insensitive) MUST NOT appear in any NEW folder segment:
+  general, misc, temp, other, stuff, category, etc, unnamed, new folder
+- Redundancy penalty: avoid repeated meaning tokens in path (e.g., workspace/mcp-workspace).
+- Never create meaningless intermediate containers like "code" or "docs" unless they add real meaning.
+
+STEP 4 — Output STRICT JSON ONLY (no extra text).
+Return:
+{
+  "placement_mode": "direct|single_file_folder|merge_existing|review_only|keep_here",
+  "target_path": "relative/path/from/base_dir",
+  "create_folders": ["list of folders to create"],
+  "confidence": 0.0-1.0,
+  "reason": "1-2 short sentences",
+  "alternatives": [
+    {"placement_mode": "...", "target_path": "...", "why_not": "..."}
+  ]
+}
 ```
 
-## 설치
+## Validation Rules
+
+1. JSON 파싱 실패 시 `review_only` 처리.
+2. `placement_mode`는 허용된 5개 중 하나여야 함.
+3. 생성될 최종 경로의 Depth가 5 이상이면 무조건 튕겨내어 `review_only` 처리.
+4. `create_folders`의 폴더명에 `general`, `misc` 등 금지어가 포함되어 있으면 `review_only` 처리.
+5. 새로 생성되는 최상위 루트 폴더가 2개 이상일 경우 FAIL.
+6. `reason` 길이가 2문장을 초과하면 길이를 자르거나 과도한 변명으로 간주하여 신뢰도를 낮춤.
+7. 이때 하위 폴더명과 상위 폴더명이 중복되어 불필요한 깊이가 생기는 경우 FAIL. AI에게 재요청을 실행한다.
+
+## Runtime Enforcement Notes
+
+- review_only: planner always routes to review queue (no auto move).
+- merge_existing: planner requires an existing destination topic/project folder; otherwise review queue.
+- single_file_folder: planner creates one folder from the file stem and moves file under it.
+  If the folder stem is generic/low-scent, planner routes to review queue.
+
+## Source of Truth
+
+Runtime implementation lives in app/index_v2/classifier.py and planner-level review enforcement in app/index_v2/planner.py.
+
+## Operational Checks
+
+Use these commands when the organizer feels inactive.
 
 ```bash
-cd /Users/giminu0930/Desktop/groq-mcp-mac-agent
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-chmod +x main.py
+/Users/giminu0930/Documents/.venv/bin/python index_organizer.py status --config ~/folder-organizer-v2.yml
 ```
 
-`.env`에 Groq API 키를 넣습니다.
+Expected key lines:
 
-```env
-GROQ_API_KEY=your_groq_api_key_here
-```
+- service_loaded=true: launchd service is loaded and running.
+- operation_state=ACTION_REQUIRED: automatic moves exist.
+- operation_state=MANUAL_REVIEW_PENDING: no automatic action, but review queue exists.
+- operation_state=CONVERGED_OR_IDLE: no pending automatic action and no review queue.
+- llm_fallback_active=true: ambiguous watch-root items can use AI classification.
+- llm_fallback_active=false: V2 is currently running in deterministic-only mode.
 
-기본 MCP 설정 파일은 `/Users/giminu0930/Desktop/mcp/.vscode/mcp.json` 입니다.
-
-## 실행 방법
-
-인터랙티브 CLI:
+To print more review candidates:
 
 ```bash
-python3 main.py
+/Users/giminu0930/Documents/.venv/bin/python index_organizer.py status --config ~/folder-organizer-v2.yml --review-limit 20
 ```
 
-현재 폴더를 바로 온보딩:
+Run one explicit service cycle:
 
 ```bash
-python3 main.py .
+/Users/giminu0930/Documents/.venv/bin/python index_organizer.py service-tick --config ~/folder-organizer-v2.yml --apply
 ```
 
-특정 프로젝트 경로를 바로 온보딩:
+Shortcut wrapper:
 
 ```bash
-python3 main.py /Users/giminu0930/Desktop/groq-meeting-minutes-agent
+/Users/giminu0930/Documents/.venv/bin/python quick_organizer.py status --config ~/folder-organizer-v2.yml
 ```
 
-자유 요청 실행:
+## Keep the organizer running automatically
+
+Install the `service` launchd job with the exact config you just created so it boots at login and keeps rerunning the watcher/opportunistic cycles without manual restarts:
 
 ```bash
-python3 main.py "requirements.txt와 README를 읽고 실행 방법을 정리해줘"
+cd /Users/giminu0930/projects/workspace/groq-mcp-mac-agent/code
+/Users/giminu0930/Documents/.venv/bin/python index_organizer.py service-install \
+  --config /Users/giminu0930/projects/workspace/groq-mcp-mac-agent/folder-organizer-v2.live.yml
 ```
 
-표준 입력:
+The job now references the provided file and will run at every login or reboot. When you edit the config again, rerun the same install command (or `service-uninstall` first if you want to reset the job) to refresh the launchd payload. Use `service-status` to confirm the agent is loaded:
 
 ```bash
-pbpaste | python3 main.py --stdin
+/Users/giminu0930/Documents/.venv/bin/python index_organizer.py service-status
 ```
-
-## CLI 명령
-
-- `/help`
-- `/status`
-- `/servers`
-- `/tools`
-- `/onboard <path>`
-- `/stack <path>`
-- `/runbook <path>`
-- `/files <path>`
-- `/risks <path>`
-- `/sample`
-- `/quit`
-
-예시:
-
-```text
-/onboard ~/Desktop/groq-meeting-minutes-agent
-/stack ~/Desktop/openai-realtime-transcribe
-/runbook ~/Desktop/groq-debugging-helper-agent
-/files ~/Desktop/mcp
-/risks ~/Desktop/groq-mcp-mac-agent
-```
-
-## 출력물
-
-각 실행 결과는 `outputs/` 아래에 저장됩니다.
-
-- `project_onboarding_YYYYMMDD_HHMMSS.json`
-- `project_onboarding_YYYYMMDD_HHMMSS.md`
-
-Markdown은 사람이 읽는 보고서이고, JSON은 제출 자료나 후속 자동화에 쓰기 쉬운 실행 로그입니다.
-
-
-## 테스트
-
-```bash
-python3 -m unittest discover -s tests -v
-```
-
-## 한계
-
-- 현재는 `local-fs` 같은 로컬 파일 중심 MCP 서버에 최적화되어 있습니다.
-- 잘못된 실행 명령을 만들지 않도록 파일 근거가 없는 내용은 일부러 비워둘 수 있습니다.
-- 기본 모드는 `safe`라서 읽기 위주 분석에 맞춰져 있습니다.
-
-## 제출 시 설명 예시
-
-이 프로젝트는 로컬 프로젝트 폴더를 읽고, 새로운 팀원이 빠르게 적응할 수 있도록 기술 스택, 실행 방법, 핵심 파일, 리스크를 자동으로 정리하는 단일 목적 에이전트입니다. Groq API가 분석과 의사결정을 담당하고, MCP가 실제 파일 시스템 접근 도구를 제공해 단순 텍스트 생성이 아니라 도구 기반 분석 흐름을 보여줍니다.

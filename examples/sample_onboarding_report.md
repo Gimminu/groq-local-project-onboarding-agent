@@ -1,7 +1,7 @@
 # Groq Project Onboarding Run
 
 ## Request
-프로젝트 경로: /Users/giminu0930/Desktop/groq-meeting-minutes-agent
+프로젝트 경로: /Users/giminu0930/Documents/projects/apps/openai-realtime-transcribe
 이 프로젝트를 처음 받는 팀원을 위한 온보딩 보고서를 작성해줘.
 
 ## Context
@@ -15,12 +15,12 @@
 1. fs_list
    - reasoning: 먼저 프로젝트 루트 파일을 확인한다.
    - is_error: False
-   - arguments: {"path": "/Users/giminu0930/Desktop/groq-meeting-minutes-agent"}
+   - arguments: {"path": "/Users/giminu0930/Documents/projects/apps/openai-realtime-transcribe"}
    - result: README.md, requirements.txt, samples, app, tests
 2. fs_read
    - reasoning: 실행 방법과 목적을 파악하기 위해 README를 읽는다.
    - is_error: False
-   - arguments: {"path": "/Users/giminu0930/Desktop/groq-meeting-minutes-agent/README.md"}
+   - arguments: {"path": "/Users/giminu0930/Documents/projects/apps/openai-realtime-transcribe/README.md"}
    - result: 프로젝트 설명과 사용법을 확인했다.
 
 ## Final Report

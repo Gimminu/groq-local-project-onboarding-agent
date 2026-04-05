@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import io
 import os
 import sys
+import time
+import traceback
 from pathlib import Path
 
 try:
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - optional during local inspection
-    def load_dotenv(dotenv_path=None, override: bool = False) -> bool:
+    def _fallback_load_dotenv(dotenv_path=None, override: bool = False) -> bool:
         candidate = Path(dotenv_path) if dotenv_path else Path(".env")
         if not candidate.exists():
             return False
@@ -31,26 +35,28 @@ except ImportError:  # pragma: no cover - optional during local inspection
                 os.environ[key] = value
             loaded = True
         return loaded
+    load_dotenv = _fallback_load_dotenv
 
 from app.agent import AutomationAgent
 from app.config import DEFAULT_MCP_CONFIG_PATH, ServerConfig, load_mcp_servers
 from app.errors import AppError
-from app.groq_planner import GroqPlanner
 from app.policy import MODE_VALUES
 from app.presets import build_preset_request, maybe_expand_directory_request
 from app.rendering import write_trace_files
-from app.schema import DEFAULT_MODEL
+from app.schema import AgentRunTrace, DEFAULT_MODEL
 
 HELP_TEXT = """
 명령어:
   /help               사용 가능한 명령어 보기
-  /status             현재 서버, 모드, 모델 보기
+  /status             현재 서버, 모드, 모델, 프로바이더 보기
   /servers            설정된 MCP 서버 목록 보기
   /tools              현재 서버에서 허용된 MCP 툴 보기
   /server <name>      사용할 MCP 서버 변경
   /mode <safe|write|full>
                       툴 실행 모드 변경
-  /model <model_id>   Groq 모델 변경
+  /model <model_id>   LLM 모델 변경
+  /provider <groq|gemini>
+                      LLM 프로바이더 선택 (Groq 또는 Gemini)
   /onboard <path>     프로젝트 온보딩 보고서 생성
   /stack <path>       기술 스택과 의존성 파일 요약
   /runbook <path>     실행/테스트 명령과 환경 변수 힌트 정리
@@ -65,7 +71,8 @@ HELP_TEXT = """
   - `python main.py "/Users/.../my-project"`도 같은 방식으로 동작합니다.
   - `python main.py "requirements.txt를 읽고 실행법을 정리해줘"`처럼 자유 요청도 가능합니다.
   - `pbpaste | python main.py --stdin`으로 파이프 입력도 받을 수 있습니다.
-  - 기본 MCP 설정 파일은 Desktop/mcp/.vscode/mcp.json 입니다.
+  - 기본 MCP 설정 파일은 repo 기준 `../mcp/.vscode/mcp.json` 입니다.
+  - LLM_PROVIDER 환경변수로 기본 프로바이더 설정 (groq 또는 gemini)
 """.strip()
 
 SAMPLE_REQUEST = build_preset_request(
@@ -80,6 +87,13 @@ def load_local_env() -> None:
         load_dotenv(env_path)
     else:
         load_dotenv()
+
+    # Reduce noisy grpc/absl informational logs from provider SDK/runtime.
+    os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
+    os.environ.setdefault("GLOG_minloglevel", "3")
+    os.environ.setdefault("GRPC_TRACE", "")
+    os.environ.setdefault("ABSL_LOGGING_MIN_LOG_LEVEL", "3")
+    os.environ.setdefault("ABSL_LOGGING_STDERR_THRESHOLD", "3")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -106,7 +120,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default=DEFAULT_MODEL,
-        help=f"Groq 모델 ID (기본값: {DEFAULT_MODEL})",
+        help=f"LLM 모델 ID (기본값: {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--provider",
+        default=os.getenv("LLM_PROVIDER", "groq"),
+        choices=["groq", "gemini"],
+        help="LLM 프로바이더 선택 (groq 또는 gemini, 기본값: LLM_PROVIDER 환경변수 또는 groq)",
     )
     parser.add_argument(
         "--output-dir",
@@ -151,14 +171,76 @@ def get_server(config_path: str, server_name: str) -> ServerConfig:
         ) from exc
 
 
-def build_agent(model: str, require_planner: bool) -> AutomationAgent:
+def build_agent(model: str, provider: str, require_planner: bool) -> AutomationAgent:
     planner = None
     if require_planner:
-        planner = GroqPlanner(
-            api_key=os.getenv("GROQ_API_KEY"),
-            model=model,
-        )
+        if provider == "gemini":
+            from app.llm.gemini_planner import GeminiPlanner
+
+            planner = GeminiPlanner(
+                api_key=os.getenv("GEMINI_API_KEY"),
+                model=model if model != DEFAULT_MODEL else "gemini-2.0-flash",
+            )
+        else:  # groq is default
+            from app.llm.groq_planner import GroqPlanner
+
+            planner = GroqPlanner(
+                api_key=os.getenv("GROQ_API_KEY"),
+                model=model,
+            )
     return AutomationAgent(planner=planner)
+
+
+def _is_gemini_quota_error(message: str) -> bool:
+    normalized = message.lower()
+    signals = (
+        "resource_exhausted",
+        "quota exceeded",
+        "statuscode.resource_exhausted",
+        "429",
+    )
+    return any(signal in normalized for signal in signals)
+
+
+def _is_rate_limit_error(message: str) -> bool:
+    normalized = message.lower()
+    signals = (
+        "429",
+        "too many requests",
+        "rate limit",
+        "rate_limit",
+        "resource_exhausted",
+    )
+    return any(signal in normalized for signal in signals)
+
+
+def _is_groq_odd_200_error(message: str) -> bool:
+    normalized = message.lower()
+    if "[provider_internal_200]" in normalized:
+        return True
+    return "status code 200" in normalized and any(token in normalized for token in ("error", "failed", "exception"))
+
+
+def _provider_env_ready(provider: str) -> bool:
+    if provider == "gemini":
+        return bool(os.getenv("GEMINI_API_KEY"))
+    return bool(os.getenv("GROQ_API_KEY"))
+
+
+def _other_provider(provider: str) -> str:
+    return "groq" if provider == "gemini" else "gemini"
+
+
+def _is_retryable_provider_error(provider: str, error_text: str) -> bool:
+    if _is_rate_limit_error(error_text):
+        return True
+    if provider == "groq" and _is_groq_odd_200_error(error_text):
+        return False
+    if provider == "gemini" and _is_gemini_quota_error(error_text):
+        return False
+    transient_signals = ("timeout", "timed out", "connection reset", "service unavailable", "temporarily unavailable")
+    normalized = error_text.lower()
+    return any(signal in normalized for signal in transient_signals)
 
 
 def print_server_list(config_path: str) -> None:
@@ -168,9 +250,9 @@ def print_server_list(config_path: str) -> None:
         print(f"{name}: {server.command} {args_preview}".strip())
 
 
-def print_tool_list(config_path: str, server_name: str, mode: str) -> None:
+def print_tool_list(config_path: str, server_name: str, mode: str, provider: str, model: str) -> None:
     server_config = get_server(config_path, server_name)
-    agent = build_agent(model=DEFAULT_MODEL, require_planner=False)
+    agent = build_agent(model=model, provider=provider, require_planner=False)
     tools = asyncio.run(agent.list_available_tools(server_config, mode))
     if not tools:
         raise AppError(f"{server_name} 서버에서 mode={mode}로 사용할 수 있는 tool이 없습니다.")
@@ -186,20 +268,112 @@ def run_request_once(
     server_name: str,
     mode: str,
     model: str,
+    provider: str,
     output_dir: Path,
 ) -> tuple[str, Path, Path]:
-    server_config = get_server(config_path, server_name)
-    agent = build_agent(model=model, require_planner=True)
-    trace = asyncio.run(
-        agent.execute_request(
+    try:
+        server_config = get_server(config_path, server_name)
+    except AppError as exc:
+        fallback_message = _build_local_fallback_answer(
             request=request,
-            server_config=server_config,
-            mode=mode,
-            model=model,
+            provider=provider,
+            error=exc,
         )
+        trace = AgentRunTrace.create(
+            request=request,
+            server_name=server_name,
+            model=model,
+            mode=mode,
+            available_tools=[],
+            steps=[],
+            final_answer=fallback_message,
+        )
+        json_path, markdown_path = write_trace_files(trace=trace, output_dir=output_dir)
+        return trace.final_answer, json_path, markdown_path
+    current_provider = provider
+    visited_providers: set[str] = set()
+    final_failure: Exception | None = None
+
+    while True:
+        agent = build_agent(model=model, provider=current_provider, require_planner=True)
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                trace = asyncio.run(
+                    agent.execute_request(
+                        request=request,
+                        server_config=server_config,
+                        mode=mode,
+                        model=model,
+                    )
+                )
+                json_path, markdown_path = write_trace_files(trace=trace, output_dir=output_dir)
+                return trace.final_answer, json_path, markdown_path
+            except BaseException as exc:
+                error_text = str(exc)
+                try:
+                    error_text = "\n".join(traceback.format_exception(exc))
+                except Exception:
+                    pass
+
+                if attempt < max_retries and _is_retryable_provider_error(current_provider, error_text):
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+
+                fallback_provider = _other_provider(current_provider)
+                can_fallback = (
+                    fallback_provider not in visited_providers
+                    and _provider_env_ready(fallback_provider)
+                )
+                if can_fallback:
+                    visited_providers.add(current_provider)
+                    current_provider = fallback_provider
+                    break
+
+                final_failure = AppError(f"{current_provider.upper()} 요청 실패: {exc}")
+                break
+
+        else:
+            final_failure = AppError(f"{current_provider.upper()} 요청 재시도 한도 초과")
+
+        if final_failure is not None:
+            break
+
+    fallback_message = _build_local_fallback_answer(
+        request=request,
+        provider=provider,
+        error=final_failure,
+    )
+    trace = AgentRunTrace.create(
+        request=request,
+        server_name=server_config.name,
+        model=model,
+        mode=mode,
+        available_tools=[],
+        steps=[],
+        final_answer=fallback_message,
     )
     json_path, markdown_path = write_trace_files(trace=trace, output_dir=output_dir)
     return trace.final_answer, json_path, markdown_path
+
+
+def _build_local_fallback_answer(*, request: str, provider: str, error: Exception | None) -> str:
+    reason = str(error) if error else "알 수 없는 provider 오류"
+    lines = [
+        "실행은 유지되었지만 원격 LLM 호출은 모두 실패했습니다.",
+        f"- 최초 provider: {provider}",
+        f"- 실패 원인: {reason}",
+        "- 조치: 재시도/양방향 폴백 이후 로컬 폴백 응답으로 종료",
+        "",
+        "요청 요약:",
+        request,
+        "",
+        "다음 권장 조치:",
+        "1) API 키/요금제/쿼터 확인",
+        "2) 잠시 후 재실행(429/레이트 제한 해소)",
+        "3) 필요시 provider를 수동 전환 (/provider groq|gemini)",
+    ]
+    return "\n".join(lines)
 
 
 def resolve_request(args: argparse.Namespace) -> str | None:
@@ -225,17 +399,19 @@ def run_interactive_shell(
     server_name: str,
     mode: str,
     model: str,
+    provider: str,
     output_dir: Path,
 ) -> int:
     current_config_path = config_path
     current_server_name = server_name
     current_mode = mode
     current_model = model
+    current_provider = provider
     current_output_dir = output_dir
 
-    print("Groq Local Project Onboarding Agent")
+    print("LLM Onboarding Agent (Groq/Gemini)")
     print(f"config={current_config_path}")
-    print(f"server={current_server_name} mode={current_mode} model={current_model}")
+    print(f"server={current_server_name} mode={current_mode} model={current_model} provider={current_provider}")
     print("`/help`로 명령어를 확인하세요.")
 
     while True:
@@ -252,16 +428,19 @@ def run_interactive_shell(
             continue
 
         if raw.startswith("/"):
-            should_exit, current_server_name, current_mode, current_model, current_output_dir = (
+            result = (
                 handle_shell_command(
                     raw=raw,
                     config_path=current_config_path,
                     server_name=current_server_name,
                     mode=current_mode,
                     model=current_model,
+                    provider=current_provider,
                     output_dir=current_output_dir,
+                    include_provider_in_result=True,
                 )
             )
+            should_exit, current_server_name, current_mode, current_model, current_provider, current_output_dir = result
             if should_exit:
                 return 0
             continue
@@ -272,6 +451,7 @@ def run_interactive_shell(
             server_name=current_server_name,
             mode=current_mode,
             model=current_model,
+            provider=current_provider,
             output_dir=current_output_dir,
         )
 
@@ -283,59 +463,81 @@ def handle_shell_command(
     server_name: str,
     mode: str,
     model: str,
+    provider: str = "groq",
     output_dir: Path,
-) -> tuple[bool, str, str, str, Path]:
+    include_provider_in_result: bool = False,
+) -> tuple[bool, str, str, str, Path] | tuple[bool, str, str, str, str, Path]:
+    def _result(
+        should_exit: bool,
+        next_server: str,
+        next_mode: str,
+        next_model: str,
+        next_provider: str,
+        next_output: Path,
+    ) -> tuple[bool, str, str, str, Path] | tuple[bool, str, str, str, str, Path]:
+        if include_provider_in_result:
+            return should_exit, next_server, next_mode, next_model, next_provider, next_output
+        return should_exit, next_server, next_mode, next_model, next_output
+
     parts = raw.split(maxsplit=1)
     command = parts[0].lower()
     argument = parts[1].strip() if len(parts) > 1 else ""
 
     if command in {"/quit", "/exit"}:
-        return True, server_name, mode, model, output_dir
+        return _result(True, server_name, mode, model, provider, output_dir)
     if command == "/help":
         print(HELP_TEXT)
-        return False, server_name, mode, model, output_dir
+        return _result(False, server_name, mode, model, provider, output_dir)
     if command == "/status":
         print(f"config={config_path}")
         print(f"server={server_name}")
         print(f"mode={mode}")
         print(f"model={model}")
+        print(f"provider={provider}")
         print(f"output={output_dir}")
-        return False, server_name, mode, model, output_dir
+        return _result(False, server_name, mode, model, provider, output_dir)
     if command == "/servers":
         try:
             print_server_list(config_path)
         except AppError as exc:
             print(f"오류: {exc}")
-        return False, server_name, mode, model, output_dir
+        return _result(False, server_name, mode, model, provider, output_dir)
     if command == "/tools":
         try:
-            print_tool_list(config_path, server_name, mode)
+            print_tool_list(config_path, server_name, mode, provider, model)
         except AppError as exc:
             print(f"오류: {exc}")
-        return False, server_name, mode, model, output_dir
+        return _result(False, server_name, mode, model, provider, output_dir)
     if command == "/server":
         if not argument:
             print("사용법: /server <name>")
-            return False, server_name, mode, model, output_dir
+            return _result(False, server_name, mode, model, provider, output_dir)
         try:
             get_server(config_path, argument)
         except AppError as exc:
             print(f"오류: {exc}")
-            return False, server_name, mode, model, output_dir
+            return _result(False, server_name, mode, model, provider, output_dir)
         print(f"server 변경: {server_name} -> {argument}")
-        return False, argument, mode, model, output_dir
+        return _result(False, argument, mode, model, provider, output_dir)
     if command == "/mode":
         if argument not in MODE_VALUES:
             print(f"사용법: /mode <{'|'.join(MODE_VALUES)}>")
-            return False, server_name, mode, model, output_dir
+            return _result(False, server_name, mode, model, provider, output_dir)
         print(f"mode 변경: {mode} -> {argument}")
-        return False, server_name, argument, model, output_dir
+        return _result(False, server_name, argument, model, provider, output_dir)
     if command == "/model":
         if not argument:
             print("사용법: /model <model_id>")
-            return False, server_name, mode, model, output_dir
+            return _result(False, server_name, mode, model, provider, output_dir)
         print(f"model 변경: {model} -> {argument}")
-        return False, server_name, mode, argument, output_dir
+        return _result(False, server_name, mode, argument, provider, output_dir)
+    if command == "/provider":
+        if argument not in ["groq", "gemini"]:
+            print("사용법: /provider <groq|gemini>")
+            return _result(False, server_name, mode, model, provider, output_dir)
+        print(f"provider 변경: {provider} -> {argument}")
+        return _result(False, server_name, mode, model, argument, output_dir)
+
     if command == "/sample":
         execute_and_print(
             request=SAMPLE_REQUEST,
@@ -343,15 +545,16 @@ def handle_shell_command(
             server_name=server_name,
             mode=mode,
             model=model,
+            provider=provider,
             output_dir=output_dir,
         )
-        return False, server_name, mode, model, output_dir
+        return _result(False, server_name, mode, model, provider, output_dir)
     if command in {"/onboard", "/stack", "/runbook", "/files", "/risks"}:
         if not argument:
             preset_name = command.removeprefix("/")
             print(f"사용법: {command} <project_path>")
-            print(f"예시: {command} ~/Desktop/{preset_name}-demo")
-            return False, server_name, mode, model, output_dir
+            print(f"예시: {command} ~/Documents/projects/{preset_name}-demo")
+            return _result(False, server_name, mode, model, provider, output_dir)
         try:
             request = build_preset_request(command.removeprefix("/"), argument)
             execute_and_print(
@@ -360,14 +563,15 @@ def handle_shell_command(
                 server_name=server_name,
                 mode=mode,
                 model=model,
+                provider=provider,
                 output_dir=output_dir,
             )
         except AppError as exc:
             print(f"오류: {exc}")
-        return False, server_name, mode, model, output_dir
+        return _result(False, server_name, mode, model, provider, output_dir)
 
     print("알 수 없는 명령어입니다. `/help`를 확인하세요.")
-    return False, server_name, mode, model, output_dir
+    return _result(False, server_name, mode, model, provider, output_dir)
 
 
 def execute_and_print(
@@ -377,17 +581,33 @@ def execute_and_print(
     server_name: str,
     mode: str,
     model: str,
+    provider: str = "groq",
     output_dir: Path,
 ) -> int:
+    quiet_stderr = os.getenv("AGENT_QUIET_STDERR", "1") != "0"
+    stderr_buffer = io.StringIO()
     try:
-        final_answer, json_path, markdown_path = run_request_once(
-            request=request,
-            config_path=config_path,
-            server_name=server_name,
-            mode=mode,
-            model=model,
-            output_dir=output_dir,
-        )
+        if quiet_stderr:
+            with contextlib.redirect_stderr(stderr_buffer):
+                final_answer, json_path, markdown_path = run_request_once(
+                    request=request,
+                    config_path=config_path,
+                    server_name=server_name,
+                    mode=mode,
+                    model=model,
+                    provider=provider,
+                    output_dir=output_dir,
+                )
+        else:
+            final_answer, json_path, markdown_path = run_request_once(
+                request=request,
+                config_path=config_path,
+                server_name=server_name,
+                mode=mode,
+                model=model,
+                provider=provider,
+                output_dir=output_dir,
+            )
     except AppError as exc:
         print(f"오류: {exc}")
         return 1
@@ -408,7 +628,7 @@ def run(argv: list[str] | None = None) -> int:
             return 0
 
         if args.list_tools:
-            print_tool_list(args.config, args.server, args.mode)
+            print_tool_list(args.config, args.server, args.mode, args.provider, args.model)
             return 0
 
         request = resolve_request(args)
@@ -419,6 +639,7 @@ def run(argv: list[str] | None = None) -> int:
                     server_name=args.server,
                     mode=args.mode,
                     model=args.model,
+                    provider=args.provider,
                     output_dir=Path(args.output_dir),
                 )
 
@@ -438,6 +659,7 @@ def run(argv: list[str] | None = None) -> int:
             server_name=args.server,
             mode=args.mode,
             model=args.model,
+            provider=args.provider,
             output_dir=Path(args.output_dir),
         )
     except AppError as exc:

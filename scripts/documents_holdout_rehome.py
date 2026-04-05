@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+
+@dataclass(slots=True)
+class MovePlan:
+    source: Path
+    destination: Path
+    reason: str
+
+
+HOLDOUT_MOVE_POLICY: dict[str, tuple[str, str]] = {
+    "agent-workflows": ("Projects/Active", "project_active"),
+    "mobile-manipulator-robot": ("Projects/Active", "project_active"),
+    "pdf-quiz-grader": ("Projects/Active", "project_active"),
+    "presentation-deck-builder": ("Projects/Active", "project_active"),
+    "libraries": ("Projects/Shared", "shared_library"),
+    "프로젝트": ("Projects/Legacy-KR", "legacy_project_kr"),
+}
+
+KEEP_ROOT_NAMES = (
+    "Archive",
+    "Collections",
+    "Obsidian",
+    "photos",
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate and optionally apply a second-phase holdout rehome plan for Documents root.",
+    )
+    parser.add_argument(
+        "--documents-root",
+        default="/Users/giminu0930/Documents",
+        help="Documents root path.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="outputs",
+        help="Directory where manifest reports are written.",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply planned moves. Without this flag, only dry-run manifest is generated.",
+    )
+    return parser.parse_args()
+
+
+def build_plans(documents_root: Path) -> list[MovePlan]:
+    plans: list[MovePlan] = []
+    for name, (target_rel_root, reason) in HOLDOUT_MOVE_POLICY.items():
+        source = documents_root / name
+        if not source.exists():
+            continue
+        destination = documents_root / target_rel_root / name
+        plans.append(MovePlan(source=source, destination=destination, reason=reason))
+    return plans
+
+
+def _apply_move(plan: MovePlan) -> tuple[bool, str]:
+    source = plan.source
+    destination = plan.destination
+
+    if source.is_symlink():
+        return False, "skip_symlink_source"
+    if not source.exists():
+        return False, "skip_missing_source"
+    if destination.exists():
+        return False, "skip_destination_exists"
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source), str(destination))
+    return True, "moved"
+
+
+def write_manifest(
+    output_dir: Path,
+    *,
+    documents_root: Path,
+    applied: bool,
+    results: list[dict],
+) -> tuple[Path, Path]:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    json_path = output_dir / f"documents_holdout_rehome_manifest_{timestamp}.json"
+    md_path = output_dir / f"documents_holdout_rehome_manifest_{timestamp}.md"
+
+    reason_counts: dict[str, int] = {}
+    status_counts: dict[str, int] = {}
+    for item in results:
+        reason = str(item.get("reason", "-"))
+        status = str(item.get("status", "-"))
+        reason_counts[reason] = int(reason_counts.get(reason, 0)) + 1
+        status_counts[status] = int(status_counts.get(status, 0)) + 1
+
+    payload = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "documents_root": str(documents_root),
+        "applied": applied,
+        "keep_root_names": list(KEEP_ROOT_NAMES),
+        "policy": [
+            {
+                "name": name,
+                "target_root": target_root,
+                "reason": reason,
+            }
+            for name, (target_root, reason) in HOLDOUT_MOVE_POLICY.items()
+        ],
+        "planned_moves": len(results),
+        "status_counts": status_counts,
+        "reason_counts": reason_counts,
+        "results": results,
+    }
+
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    lines: list[str] = []
+    lines.append("# Documents Holdout Rehome Manifest")
+    lines.append("")
+    lines.append(f"- Timestamp: {payload['timestamp']}")
+    lines.append(f"- Root: {documents_root}")
+    lines.append(f"- Applied: {str(applied).lower()}")
+    lines.append(f"- Planned moves: {len(results)}")
+    lines.append("")
+
+    lines.append("## Status Counts")
+    for key in sorted(status_counts):
+        lines.append(f"- {key}: {status_counts[key]}")
+    if not status_counts:
+        lines.append("- none")
+    lines.append("")
+
+    lines.append("## Reason Counts")
+    for key in sorted(reason_counts):
+        lines.append(f"- {key}: {reason_counts[key]}")
+    if not reason_counts:
+        lines.append("- none")
+    lines.append("")
+
+    lines.append("## Move Results")
+    if results:
+        lines.append("| Source | Destination | Reason | Status | Result |")
+        lines.append("|---|---|---|---|---|")
+        for item in results:
+            lines.append(
+                f"| {item['source']} | {item['destination']} | {item['reason']} | {item['status']} | {item['result']} |"
+            )
+    else:
+        lines.append("- none")
+
+    lines.append("")
+    lines.append("## Keep-At-Root Names")
+    for name in KEEP_ROOT_NAMES:
+        lines.append(f"- {name}")
+
+    lines.append("")
+    lines.append("## Rollback Hints")
+    lines.append("For rows with status=success, reverse move from destination to source.")
+
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return json_path, md_path
+
+
+def main() -> int:
+    args = parse_args()
+    documents_root = Path(args.documents_root).expanduser().resolve()
+    output_dir = Path(args.output_dir).expanduser().resolve()
+
+    if not documents_root.exists() or not documents_root.is_dir():
+        print(f"Documents root does not exist or is not a directory: {documents_root}")
+        return 1
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    plans = build_plans(documents_root)
+    results: list[dict] = []
+    for plan in plans:
+        if args.apply:
+            success, result = _apply_move(plan)
+            status = "success" if success else "skipped"
+        else:
+            status = "planned"
+            result = "planned"
+
+        results.append(
+            {
+                "source": str(plan.source),
+                "destination": str(plan.destination),
+                "reason": plan.reason,
+                "status": status,
+                "result": result,
+            }
+        )
+
+    json_path, md_path = write_manifest(
+        output_dir,
+        documents_root=documents_root,
+        applied=bool(args.apply),
+        results=results,
+    )
+
+    print(f"Documents root: {documents_root}")
+    print(f"Planned moves: {len(results)}")
+    print(f"Applied: {str(bool(args.apply)).lower()}")
+    print(f"JSON manifest: {json_path}")
+    print(f"MD manifest: {md_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

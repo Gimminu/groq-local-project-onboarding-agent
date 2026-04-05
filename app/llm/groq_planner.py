@@ -9,6 +9,7 @@ except ImportError:  # pragma: no cover - exercised when dependency is absent
     Groq = None
 
 from app.errors import AppError
+from app.llm.planner import BasePlanner
 from app.prompting import build_messages
 from app.schema import (
     DEFAULT_MODEL,
@@ -20,7 +21,7 @@ from app.schema import (
 )
 
 
-class GroqPlanner:
+class GroqPlanner(BasePlanner):
     def __init__(
         self,
         api_key: str | None,
@@ -32,7 +33,7 @@ class GroqPlanner:
                 "GROQ_API_KEY가 설정되지 않았습니다. "
                 "`.env` 파일이나 셸 환경변수에 API 키를 추가하세요."
             )
-        self.model = model
+        super().__init__(api_key=api_key, model=model)
 
         if client is not None:
             self.client = client
@@ -117,6 +118,11 @@ class GroqPlanner:
                 response_format=response_format,
             )
         except Exception as exc:  # pragma: no cover - depends on network/API
+            msg = str(exc)
+            if _is_odd_200_error(msg):
+                raise AppError(f"Groq API 호출에 실패했습니다 [provider_internal_200]: {exc}") from exc
+            if _is_rate_limited(msg):
+                raise AppError(f"Groq API 호출에 실패했습니다 [rate_limit]: {exc}") from exc
             raise AppError(f"Groq API 호출에 실패했습니다: {exc}") from exc
 
         try:
@@ -171,3 +177,14 @@ def _extract_json_candidate(content: str) -> str:
         return stripped[start : end + 1]
 
     return stripped
+
+
+def _is_rate_limited(message: str) -> bool:
+    normalized = message.lower()
+    return any(signal in normalized for signal in ("429", "too many requests", "rate limit", "rate_limit"))
+
+
+def _is_odd_200_error(message: str) -> bool:
+    normalized = message.lower()
+    signals = ("error code: 200", "status code 200", "status code: 200")
+    return any(signal in normalized for signal in signals)
