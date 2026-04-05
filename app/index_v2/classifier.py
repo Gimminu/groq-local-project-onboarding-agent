@@ -84,6 +84,11 @@ ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2"}
 FORM_KEYWORDS = {"form", "application", "contract", "agreement", "consent", "template", "신청서", "서식", "동의서", "양식"}
 TRANSIENT_SYSTEM_PREFIXES = ("~$",)
 INCOMPLETE_SUFFIXES = (".download", ".crdownload", ".part", ".tmp", ".partial")
+ARCHIVE_BUCKET_MARKERS = ("압축원본", "archive")
+NUMBERED_TOP_LEVEL_PATTERN = re.compile(r"^(?P<number>\d{3})(?:[_\-\s].+)?$")
+NUMBERED_SUBTOPIC_PATTERN = re.compile(r"^(?P<number>\d{2})(?:[_\-\s].+)?$")
+PERIOD_TOKEN_PATTERN = re.compile(r"(?P<year>20\d{2})(?:[-_\s년]?(?P<month>0[1-9]|1[0-2]))?")
+TEMP_BUCKET_MARKERS = ("임시", "temp", "tmp")
 SYSTEM_DEPENDENCY_NAMES = {
     ".git",
     ".venv",
@@ -96,6 +101,23 @@ SYSTEM_DEPENDENCY_NAMES = {
     "dist",
     "build",
 }
+ADAPTIVE_CONTEXT_IGNORED_SEGMENTS = {
+    "download",
+    "downloads",
+    "desktop",
+    "documents",
+    "watch",
+    "watcher",
+    "staging",
+    "stage",
+    "organizer",
+    "live",
+    "test",
+    "tmp",
+    "temp",
+    "inbox",
+}
+ADAPTIVE_CONTEXT_NOISE_PATTERN = re.compile(r"(?:^|[_\-])(?:tmp|temp|test|live|watch|stage|staging|organizer)(?:[_\-]|$)")
 PROJECT_STRONG_DIR_HINTS = {".git", ".venv", "node_modules", ".pio"}
 PROJECT_STRUCTURE_HINTS = {
     "src",
@@ -215,6 +237,7 @@ class IndexClassifier:
         self._batch_command: str | None = None
         self._watch_cloud_invocations = 0
         self._content_hint_cache: dict[Path, str] = {}
+        self._directory_hit_cache: dict[str, int] = {}
         provider_env = os.getenv("LLM_PROVIDER")
         if provider_env:
             self._preferred_provider = provider_env.strip().lower()
@@ -232,6 +255,7 @@ class IndexClassifier:
     def begin_batch(self, command: str) -> None:
         self._batch_command = command
         self._watch_cloud_invocations = 0
+        self._directory_hit_cache = {}
 
     def classify(self, node: IndexedNode) -> ClassificationResult:
         if node.is_symlink:
@@ -458,6 +482,46 @@ class IndexClassifier:
         if _is_relative_to(node.path, self.config.spaces_root):
             return None
         in_hidden_review = _is_relative_to(node.path, self.config.adaptive_review_root)
+
+        archive_target = self._adaptive_archive_target(node=node, asset_type=asset_type)
+        if archive_target is not None:
+            return ClassificationResult(
+                placement_mode="merge_existing",
+                target_path=archive_target,
+                confidence=0.93,
+                rationale="archive file was routed into an existing archive-original bucket to preserve established structure",
+                source="heuristic",
+                review_required=False,
+                metadata={"adaptive_archive_bucket": True},
+                stream="adaptive",
+                domain=archive_target.split("/", 1)[0],
+                focus=archive_target.rsplit("/", 1)[-1],
+                asset_type=asset_type,
+            )
+
+        numbered_target = self._adaptive_numbered_taxonomy_target(node=node, asset_type=asset_type)
+        if numbered_target is not None:
+            target_path, placement_mode, metadata = numbered_target
+            confidence = 0.91 if placement_mode == "merge_existing" else 0.86
+            rationale = (
+                "matched existing numbered topic hierarchy using filename/content signals"
+                if placement_mode == "merge_existing"
+                else "created a numbered subtopic under a matched top-level topic"
+            )
+            return ClassificationResult(
+                placement_mode=placement_mode,
+                target_path=target_path,
+                confidence=confidence,
+                rationale=rationale,
+                source="heuristic",
+                review_required=False,
+                metadata=metadata,
+                stream="adaptive",
+                domain=target_path.split("/", 1)[0],
+                focus=target_path.rsplit("/", 1)[-1],
+                asset_type=asset_type,
+            )
+
         preferred_focus = self._adaptive_preferred_focus(node=node, asset_type=asset_type)
 
         existing_target = self._adaptive_existing_target(
@@ -510,6 +574,377 @@ class IndexClassifier:
             metadata={"adaptive_review": True},
         )
 
+    def _adaptive_archive_target(self, *, node: IndexedNode, asset_type: str) -> str | None:
+        if asset_type != "archives" or node.kind != "file":
+            return None
+        if _is_relative_to(node.path, self.config.adaptive_review_root):
+            return None
+        if not self._is_under_watch_root(node.path):
+            return None
+
+        archive_roots = self._archive_bucket_roots()
+        if not archive_roots:
+            return None
+
+        node_text = _normalized_archive_match_text(node.path.stem)
+        best: tuple[int, int, Path] | None = None
+        for root in archive_roots:
+            candidate_dirs = [root]
+            try:
+                children = sorted((child for child in root.iterdir() if child.is_dir()), key=lambda path: path.name.lower())
+            except OSError:
+                children = []
+            candidate_dirs.extend(children)
+
+            for candidate in candidate_dirs:
+                score = _archive_candidate_score(candidate_name=candidate.name, node_text=node_text)
+                if candidate != root and score <= 0:
+                    continue
+                prefer_child = 1 if candidate != root else 0
+                key = (score, prefer_child, candidate)
+                if best is None or key > best:
+                    best = key
+
+        if best is None:
+            if len(archive_roots) != 1:
+                return None
+            chosen = archive_roots[0]
+        else:
+            score, _, chosen = best
+            if score <= 0 and len(archive_roots) != 1:
+                return None
+
+        try:
+            return str(chosen.relative_to(self.config.spaces_root)).replace("\\", "/")
+        except ValueError:
+            return None
+
+    def _archive_bucket_roots(self) -> list[Path]:
+        root = self.config.spaces_root
+        if not root.exists() or not root.is_dir():
+            return []
+        buckets: list[Path] = []
+        try:
+            children = sorted((child for child in root.iterdir() if child.is_dir()), key=lambda path: path.name.lower())
+        except OSError:
+            return []
+        for child in children:
+            if child.name in self.config.ignore_names:
+                continue
+            if _looks_like_archive_bucket_name(child.name):
+                buckets.append(child)
+        return buckets
+
+    def _adaptive_numbered_taxonomy_target(
+        self,
+        *,
+        node: IndexedNode,
+        asset_type: str,
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        if node.kind != "file":
+            return None
+        if _is_relative_to(node.path, self.config.spaces_root):
+            return None
+        if not self._is_under_watch_root(node.path):
+            return None
+
+        top_roots = self._topic_top_level_roots()
+        if not top_roots:
+            return None
+
+        prefer_numbered = self._prefer_numbered_taxonomy(top_roots)
+
+        top_root = self._best_numbered_top_level(
+            node=node,
+            asset_type=asset_type,
+            roots=top_roots,
+            prefer_numbered=prefer_numbered,
+        )
+        if top_root is None:
+            return None
+
+        best_subtopic = self._best_numbered_subtopic(
+            node=node,
+            asset_type=asset_type,
+            top_root=top_root,
+            prefer_numbered=prefer_numbered,
+        )
+        if best_subtopic is not None:
+            target = str(best_subtopic.relative_to(self.config.spaces_root)).replace("\\", "/")
+            return (
+                target,
+                "merge_existing",
+                {
+                    "adaptive_numbered_taxonomy": True,
+                    "numbered_top_level": top_root.name,
+                    "numbered_subtopic": best_subtopic.name,
+                    "taxonomy_mode": "existing-folder-analysis",
+                    "numbered_mode": "merge_existing",
+                },
+            )
+
+        label = self._derive_numbered_subtopic_label(node=node, asset_type=asset_type)
+        if not label:
+            return None
+        if prefer_numbered or any(NUMBERED_SUBTOPIC_PATTERN.match(child.name) for child in _iter_dir_children(top_root)):
+            next_number = self._next_numbered_subtopic_number(top_root)
+            created = top_root / f"{next_number:02d}_{label}"
+        else:
+            created = top_root / label
+        target = str(created.relative_to(self.config.spaces_root)).replace("\\", "/")
+        return (
+            target,
+            "direct",
+            {
+                "adaptive_numbered_taxonomy": True,
+                "numbered_top_level": top_root.name,
+                "numbered_subtopic": created.name,
+                "taxonomy_mode": "existing-folder-analysis",
+                "numbered_mode": "direct",
+            },
+        )
+
+    def _topic_top_level_roots(self) -> list[Path]:
+        root = self.config.spaces_root
+        if not root.exists() or not root.is_dir():
+            return []
+        try:
+            children = sorted((child for child in root.iterdir() if child.is_dir()), key=lambda path: path.name.lower())
+        except OSError:
+            return []
+        managed_roots = {name.lower() for name in self.config.managed_root_names()}
+        roots: list[Path] = []
+        for child in children:
+            lowered = child.name.lower()
+            if child.name in self.config.ignore_names:
+                continue
+            if lowered in managed_roots:
+                continue
+            if child.name.startswith("."):
+                continue
+            roots.append(child)
+        return roots
+
+    def _prefer_numbered_taxonomy(self, roots: list[Path]) -> bool:
+        numbered_count = sum(1 for root in roots if NUMBERED_TOP_LEVEL_PATTERN.match(root.name))
+        return numbered_count >= 2 and (numbered_count * 2) >= max(1, len(roots))
+
+    def _numbered_top_level_roots(self) -> list[Path]:
+        root = self.config.spaces_root
+        if not root.exists() or not root.is_dir():
+            return []
+        try:
+            children = sorted((child for child in root.iterdir() if child.is_dir()), key=lambda path: path.name.lower())
+        except OSError:
+            return []
+        return [child for child in children if NUMBERED_TOP_LEVEL_PATTERN.match(child.name)]
+
+    def _best_numbered_top_level(
+        self,
+        *,
+        node: IndexedNode,
+        asset_type: str,
+        roots: list[Path],
+        prefer_numbered: bool,
+    ) -> Path | None:
+        node_tokens = self._adaptive_node_tokens(node)
+        source_text = self._adaptive_source_text(node)
+        allow_temp_bucket = _looks_like_temp_source(node.path)
+        best: tuple[int, int, int, str, Path] | None = None
+        for root in roots:
+            if _looks_like_temp_bucket(root.name) and not allow_temp_bucket:
+                continue
+            if self._should_skip_topic_root_for_asset(root=root, asset_type=asset_type, source_path=node.path):
+                continue
+            root_tokens = _adaptive_tokens_for_name(root.name)
+            score = _fuzzy_token_overlap_score(node_tokens, root_tokens)
+            score += _topic_hint_score(source_text=source_text, target_name=root.name, asset_type=asset_type)
+            if prefer_numbered and NUMBERED_TOP_LEVEL_PATTERN.match(root.name):
+                score += 2
+            elif prefer_numbered:
+                score -= 1
+            if score <= 0:
+                continue
+            hit_count = self._directory_hit_count(root)
+            prefix = _numbered_prefix_value(root.name, width=3)
+            key = (score, hit_count, -prefix, str(root), root)
+            if best is None or key > best:
+                best = key
+        if best is None:
+            return None
+        return best[4]
+
+    def _best_numbered_subtopic(
+        self,
+        *,
+        node: IndexedNode,
+        asset_type: str,
+        top_root: Path,
+        prefer_numbered: bool,
+    ) -> Path | None:
+        try:
+            subtopics = sorted(
+                (
+                    child
+                    for child in top_root.iterdir()
+                    if child.is_dir() and (
+                        NUMBERED_SUBTOPIC_PATTERN.match(child.name)
+                        if prefer_numbered
+                        else child.name not in self.config.ignore_names and not child.name.startswith(".")
+                    )
+                ),
+                key=lambda path: path.name.lower(),
+            )
+        except OSError:
+            return None
+        if not subtopics:
+            return None
+
+        node_tokens = self._adaptive_node_tokens(node)
+        source_text = self._adaptive_source_text(node)
+        best: tuple[int, int, int, str, Path] | None = None
+        for subtopic in subtopics:
+            target_tokens = _adaptive_tokens_for_name(subtopic.name)
+            score = _fuzzy_token_overlap_score(node_tokens, target_tokens)
+            score += _topic_hint_score(source_text=source_text, target_name=subtopic.name, asset_type=asset_type)
+            if prefer_numbered and NUMBERED_SUBTOPIC_PATTERN.match(subtopic.name):
+                score += 1
+            if score <= 0:
+                continue
+            hit_count = self._directory_hit_count(subtopic)
+            prefix = _numbered_prefix_value(subtopic.name, width=2)
+            key = (score, hit_count, -prefix, str(subtopic), subtopic)
+            if best is None or key > best:
+                best = key
+        if best is None:
+            return None
+        return best[4]
+
+    def _adaptive_node_tokens(self, node: IndexedNode) -> set[str]:
+        tokens = self._semantic_tokens(node.path)
+        if not tokens:
+            tokens = _path_tokens(node.path.stem)
+        tokens.update(_adaptive_tokens_for_name(node.path.stem))
+        tokens.update(self._adaptive_watch_context_tokens(node.path))
+        return {token for token in tokens if token}
+
+    def _adaptive_source_text(self, node: IndexedNode) -> str:
+        context_text = " ".join(sorted(self._adaptive_watch_context_tokens(node.path)))
+        return _normalized_archive_match_text(f"{node.path.stem}\n{self._content_hint(node.path)}\n{context_text}")
+
+    def _adaptive_watch_context_tokens(self, path: Path) -> set[str]:
+        context_tokens: set[str] = set()
+        root = self._watch_root_for_path(path)
+        if root is None:
+            return context_tokens
+        try:
+            relative = path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        except ValueError:
+            try:
+                relative = path.relative_to(root)
+            except ValueError:
+                return context_tokens
+        parts = list(relative.parts[:-1])
+        if not parts:
+            return context_tokens
+        for segment in parts[-4:]:
+            if self._adaptive_context_segment_ignored(segment):
+                continue
+            context_tokens.update(_adaptive_tokens_for_name(segment))
+        return {token for token in context_tokens if token and not _is_short_numeric_token(token)}
+
+    def _watch_root_for_path(self, path: Path) -> Path | None:
+        path_resolved = path.resolve(strict=False)
+        for root in sorted(self.config.watch_roots, key=lambda item: len(str(item)), reverse=True):
+            if _is_relative_to(path_resolved, root):
+                return root
+        return None
+
+    def _adaptive_context_segment_ignored(self, value: str) -> bool:
+        normalized = unicodedata.normalize("NFKC", str(value)).strip().lower()
+        if not normalized:
+            return True
+        if normalized in ADAPTIVE_CONTEXT_IGNORED_SEGMENTS:
+            return True
+        if normalized.startswith("."):
+            return True
+        if ADAPTIVE_CONTEXT_NOISE_PATTERN.search(normalized):
+            return True
+        tokenized = normalized.replace("-", "_")
+        parts = [part for part in tokenized.split("_") if part]
+        if parts and all(part.isdigit() for part in parts):
+            return True
+        return False
+
+    def _derive_numbered_subtopic_label(self, *, node: IndexedNode, asset_type: str) -> str | None:
+        focus = self._suggest_review_focus(node=node, asset_type=asset_type)
+        source_text = _normalized_archive_match_text(f"{node.path.stem}\n{self._content_hint(node.path)}")
+        doc_group = _document_group_label(source_text=source_text, asset_type=asset_type)
+        period = _extract_period_token(source_text)
+
+        base = focus or doc_group
+        if not base:
+            base = normalize_segment(node.path.stem, self.config.naming.delimiter, self.config.naming.max_segment_length)
+        if not base:
+            return None
+        if period:
+            base = f"{base}_{period}"
+        return normalize_segment(base, self.config.naming.delimiter, self.config.naming.max_segment_length)
+
+    def _next_numbered_subtopic_number(self, top_root: Path) -> int:
+        numbers: list[int] = []
+        try:
+            children = [child for child in top_root.iterdir() if child.is_dir()]
+        except OSError:
+            children = []
+        for child in children:
+            value = _numbered_prefix_value(child.name, width=2)
+            if value > 0:
+                numbers.append(value)
+        if not numbers:
+            return 1
+        return min(99, max(numbers) + 1)
+
+    def _numbered_top_level_name(self, label: str) -> str:
+        roots = self._numbered_top_level_roots()
+        if not roots or not self._prefer_numbered_taxonomy(self._topic_top_level_roots()):
+            return label
+        if NUMBERED_TOP_LEVEL_PATTERN.match(label):
+            return label
+        numbers = [value for value in (_numbered_prefix_value(root.name, width=3) for root in roots) if value > 0]
+        next_number = 1 if not numbers else min(999, max(numbers) + 1)
+        return f"{next_number:03d}_{label}"
+
+    def _should_skip_topic_root_for_asset(self, *, root: Path, asset_type: str, source_path: Path) -> bool:
+        normalized = unicodedata.normalize("NFKC", root.name).lower()
+        source_normalized = unicodedata.normalize("NFKC", str(source_path)).lower()
+        if "obsidian" in normalized and "obsidian" not in source_normalized:
+            return True
+        if asset_type != "code" and _looks_like_project_collection_root(root, self.config.project_markers):
+            return True
+        if asset_type not in {"notes", "docs", "forms"} and any(token in normalized for token in ("template", "tags", "hubs", "calendar")):
+            return True
+        return False
+
+    def _directory_hit_count(self, directory: Path) -> int:
+        marker = str(directory.resolve(strict=False))
+        cached = self._directory_hit_cache.get(marker)
+        if cached is not None:
+            return cached
+        count = 0
+        try:
+            for child in directory.rglob("*"):
+                if child.name in self.config.ignore_names:
+                    continue
+                if child.is_file():
+                    count += 1
+                if count >= 400:
+                    break
+        except OSError:
+            count = 0
+        self._directory_hit_cache[marker] = count
+        return count
+
     def _adaptive_existing_target(
         self,
         *,
@@ -527,16 +962,17 @@ class IndexClassifier:
             candidate_tokens = self._adaptive_candidate_tokens(candidate_dir)
             if not candidate_tokens:
                 continue
-            score = len(node_tokens & candidate_tokens)
+            score = _fuzzy_token_overlap_score(node_tokens, candidate_tokens)
             if score < self.config.adaptive_placement.min_existing_folder_score:
                 continue
             depth = len(candidate_dir.relative_to(self.config.spaces_root).parts)
-            key = (score, -depth, str(candidate_dir), candidate_dir)
+            hit_count = self._directory_hit_count(candidate_dir)
+            key = (score, hit_count, -depth, str(candidate_dir), candidate_dir)
             if best is None or key > best:
                 best = key
         if best is None:
             return None
-        return str(best[3].relative_to(self.config.spaces_root)).replace("\\", "/")
+        return str(best[4].relative_to(self.config.spaces_root)).replace("\\", "/")
 
     def _adaptive_preferred_focus(self, *, node: IndexedNode, asset_type: str) -> str | None:
         focus = self._suggest_review_focus(node=node, asset_type=asset_type)
@@ -645,7 +1081,7 @@ class IndexClassifier:
             and not self._adaptive_name_is_blocked_for_top_level(source_name)
             and not self.semantic_policy.is_banned_generic_name(source_name)
         ):
-            return source_name
+            return self._numbered_top_level_name(source_name)
 
         files: list[Path] = []
         if node.path.is_dir():
@@ -672,7 +1108,7 @@ class IndexClassifier:
             return None
         if inferred in self.config.asset_types:
             return None
-        return inferred
+        return self._numbered_top_level_name(inferred)
 
     def _adaptive_name_is_blocked_for_top_level(self, value: str) -> bool:
         normalized = normalize_segment(
@@ -1193,14 +1629,18 @@ class IndexClassifier:
             and pending is not None
             and pending.kind == "file"
             and current.metadata.get("adaptive_review")
-            and current.asset_type in {"docs", "slides", "notes", "forms"}
             and placement_mode in {"direct", "single_file_folder", "merge_existing"}
-            and target_depth < 2
         ):
-            placement_mode = "review_only"
-            confidence = min(confidence, max(0.35, current.confidence))
-            target_path = fallback_target or self._review_target_for_asset(current.asset_type)
-            target_depth = len([part for part in (target_path or "").split("/") if part])
+            if current.asset_type in {"docs", "slides", "notes", "forms"} and target_depth < 2:
+                placement_mode = "review_only"
+                confidence = min(confidence, max(0.35, current.confidence))
+                target_path = fallback_target or self._review_target_for_asset(current.asset_type)
+                target_depth = len([part for part in (target_path or "").split("/") if part])
+            elif current.asset_type == "archives":
+                placement_mode = "review_only"
+                confidence = min(confidence, max(0.4, current.confidence))
+                target_path = fallback_target or self._review_target_for_asset(current.asset_type)
+                target_depth = len([part for part in (target_path or "").split("/") if part])
 
         if target_depth >= 5 or invalid_new_root_count > 1 or has_banned_target_segment or has_banned_new_segment:
             placement_mode = "review_only"
@@ -1686,3 +2126,185 @@ def _clamp(value: Any, *, low: float, high: float, default: float) -> float:
 def _path_tokens(value: str) -> set[str]:
     text = unicodedata.normalize("NFKC", str(value)).lower().replace("-", " ")
     return {token for token in re.findall(r"[0-9a-z가-힣]+", text) if len(token) >= 2}
+
+
+def _adaptive_tokens_for_name(value: str) -> set[str]:
+    tokens = _path_tokens(value)
+    compact = _normalized_archive_match_text(value)
+    if compact:
+        tokens.add(compact)
+        tokens.update(_path_tokens(compact))
+    return {token for token in tokens if token}
+
+
+def _fuzzy_token_overlap_score(source_tokens: set[str], candidate_tokens: set[str]) -> int:
+    if not source_tokens or not candidate_tokens:
+        return 0
+    score = 0
+    for source in source_tokens:
+        for candidate in candidate_tokens:
+            if _is_short_numeric_token(source) or _is_short_numeric_token(candidate):
+                continue
+            if source == candidate:
+                score += 2
+                continue
+            if len(source) >= 2 and len(candidate) >= 2 and (source in candidate or candidate in source):
+                score += 1
+    return score
+
+
+def _is_short_numeric_token(token: str) -> bool:
+    text = str(token).strip()
+    return text.isdigit() and len(text) <= 4
+
+
+def _numbered_prefix_value(value: str, *, width: int) -> int:
+    pattern = NUMBERED_TOP_LEVEL_PATTERN if width == 3 else NUMBERED_SUBTOPIC_PATTERN
+    match = pattern.match(str(value).strip())
+    if not match:
+        return 0
+    try:
+        return int(match.group("number"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _topic_hint_score(*, source_text: str, target_name: str, asset_type: str) -> int:
+    target_text = _normalized_archive_match_text(target_name)
+    if not target_text:
+        return 0
+    score = 0
+    if asset_type == "archives" and any(token in target_text for token in ("압축", "archive")):
+        score += 3
+    if asset_type == "data" and any(token in target_text for token in ("데이터", "분석", "analysis")):
+        score += 2
+    if asset_type == "code" and any(token in target_text for token in ("project", "프로젝트", "개발")):
+        score += 2
+    if any(token in source_text for token in ("신청서", "양식", "form")) and any(token in target_text for token in ("양식", "법무", "제안")):
+        score += 2
+    if any(token in source_text for token in ("제안서", "proposal")) and "제안" in target_text:
+        score += 2
+    if any(token in source_text for token in ("교육", "강의", "학습")) and any(token in target_text for token in ("교육", "학습")):
+        score += 2
+    if any(token in source_text for token in ("서비스", "정의서", "spec")) and any(token in target_text for token in ("서비스", "정의")):
+        score += 2
+    if any(token in source_text for token in ("오디오", "발표", "audio")) and any(token in target_text for token in ("오디오", "발표", "audio")):
+        score += 2
+    if (
+        asset_type in {"assets", "slides"}
+        and any(token in source_text for token in ("사진", "photo", "image"))
+        and any(token in target_text for token in ("사진", "photo", "image"))
+    ):
+        score += 2
+    return score
+
+
+def _document_group_label(*, source_text: str, asset_type: str) -> str | None:
+    if any(token in source_text for token in ("신청서", "양식", "form")):
+        return "신청서"
+    if any(token in source_text for token in ("제안서", "proposal")):
+        return "제안서"
+    if any(token in source_text for token in ("정의서", "spec")):
+        return "정의서"
+    if any(token in source_text for token in ("회의록", "meeting")):
+        return "회의록"
+    if any(token in source_text for token in ("보고서", "report")):
+        return "보고서"
+    if asset_type == "archives":
+        return "압축원본"
+    if asset_type == "data":
+        return "데이터"
+    if asset_type == "code":
+        return "프로젝트"
+    return None
+
+
+def _extract_period_token(source_text: str) -> str | None:
+    match = PERIOD_TOKEN_PATTERN.search(source_text)
+    if not match:
+        return None
+    year = match.group("year")
+    month = match.group("month")
+    if not year:
+        return None
+    if month:
+        return f"{year}-{month}"
+    return year
+
+
+def _looks_like_temp_bucket(value: str) -> bool:
+    text = unicodedata.normalize("NFKC", str(value)).lower()
+    return any(marker in text for marker in TEMP_BUCKET_MARKERS)
+
+
+def _looks_like_temp_source(path: Path) -> bool:
+    text = unicodedata.normalize("NFKC", str(path)).lower()
+    return any(marker in text for marker in ("tmp", "temp", "임시", "cache"))
+
+
+def _iter_dir_children(path: Path) -> list[Path]:
+    try:
+        return [child for child in path.iterdir() if child.is_dir()]
+    except OSError:
+        return []
+
+
+def _looks_like_project_collection_root(path: Path, project_markers: tuple[str, ...]) -> bool:
+    normalized = unicodedata.normalize("NFKC", path.name).lower()
+    if any(marker in normalized for marker in ("project", "projects", "workspace", "workspaces")):
+        return True
+    children = _iter_dir_children(path)
+    if not children:
+        return False
+    detected = 0
+    marker_set = set(project_markers)
+    for child in children[:40]:
+        try:
+            names = {entry.name for entry in child.iterdir()}
+        except OSError:
+            continue
+        if names & marker_set:
+            detected += 1
+            if detected >= 2:
+                return True
+            continue
+        structure_hits = len(names & PROJECT_STRUCTURE_HINTS)
+        code_like = 0
+        try:
+            for entry in child.iterdir():
+                if entry.is_file() and entry.suffix.lower() in CODE_EXTENSIONS:
+                    code_like += 1
+                if entry.is_dir() and entry.name in PROJECT_STRONG_DIR_HINTS:
+                    code_like += 1
+        except OSError:
+            continue
+        if structure_hits >= 2 and code_like >= 1:
+            detected += 1
+        if detected >= 2:
+            return True
+    return False
+
+
+def _normalized_archive_match_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value)).lower()
+    compact = re.sub(r"[^0-9a-z가-힣]", "", normalized)
+    for marker in ARCHIVE_BUCKET_MARKERS:
+        compact = compact.replace(marker, "")
+    compact = re.sub(r"\d+차", "", compact)
+    return compact
+
+
+def _archive_candidate_score(*, candidate_name: str, node_text: str) -> int:
+    if not node_text:
+        return 0
+    score = 0
+    for token in _path_tokens(candidate_name):
+        if token and token in node_text:
+            score += 1
+    return score
+
+
+def _looks_like_archive_bucket_name(value: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", str(value)).lower()
+    compact = re.sub(r"[^0-9a-z가-힣]", "", normalized)
+    return any(marker in compact for marker in ARCHIVE_BUCKET_MARKERS)
