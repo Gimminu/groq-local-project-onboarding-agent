@@ -1,6 +1,6 @@
 # Findability-First Folder Organizer (V2)
 
-이 프로젝트는 `Desktop`, `Documents`, `Downloads` 폴더를 대상으로, 거대한 분류표(Taxonomy)를 짜맞추는 것이 아니라 **사용자가 파일을 다시 찾을 때 걸리는 클릭/검색/망설임 비용을 최소화(Findability-First)**하는 것을 목표로 합니다.
+이 프로젝트는 `Desktop`, `Documents`, `Downloads` 폴더를 대상으로, 거대한 분류표(Taxonomy)를 짜맞추는 것이 아니라 사용자가 파일을 다시 찾을 때 걸리는 클릭/검색/망설임 비용을 최소화(Findability-First)하는 것을 목표로 합니다.
 
 ## Core Philosophy: File-Level Precision & Dynamic Routing
 
